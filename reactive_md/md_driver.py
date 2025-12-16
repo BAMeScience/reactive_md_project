@@ -1,6 +1,8 @@
 # reactive_md/md_driver.py
 from __future__ import annotations
 from dataclasses import dataclass
+from dataclasses import replace
+
 import jax
 import jax.numpy as jnp
 from jax_md import simulate
@@ -75,7 +77,7 @@ def run_md_nvt_with_reactions(
         reacted = int(jnp.sum(sys.pf6_reacted))
         print(f"[step {steps_done:6d}] PE={PE: .6f}  KE={KE: .6f}  reacted={reacted}")
 
-        key, accepted, ff_new, sys_new, info = reaction_step_fn(key, positions, ff, sys)
+        key, accepted, ff_new, sys_new, info, R_new = reaction_step_fn(key, positions, ff, sys)
         if accepted:
             accepted_events += 1
             print(
@@ -84,6 +86,8 @@ def run_md_nvt_with_reactions(
             )
             ff = ff_new
             sys = sys_new
+            md_state = replace(md_state, position=R_new)
+            ff.nlist = ff.neighbor_fn.allocate(R_new)
             # refresh integrator to use new energy function
             init_nvt, apply_nvt = make_integrator(ff.energy_fn)
         else:

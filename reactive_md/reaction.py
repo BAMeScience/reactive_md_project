@@ -5,10 +5,12 @@ from typing import Optional, Any
 import numpy as np
 import jax
 import jax.numpy as jnp
+from jax_md.minimize import fire_descent
 
 from .templates_pf5 import PF5Template, LiFTemplate
 from .topology_opls import embed_pf5_into_pf6, remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
+
 
 @dataclass
 class SystemState:
@@ -237,15 +239,10 @@ def maybe_react_one_event(
             )
         else:
             print("  [debug] No Li–F pairs found at all (unexpected).")
-        return key, False, ff, sys, {}
+        return key, False, ff, sys, {}, R
 
-    # probe geometry
-    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-    R_probe = make_probe_geometry(R, P_atom=P_atom, leave_F=cand.leave_F,
-                                  disp_fn=ff.disp_fn, shift_fn=shift_fn, r_pf_probe=4.0)
-
-    # Energy before (NOTE: kept compatible with your original flow)
-    E_before = float(ff.energy_fn(R_probe, ff.nlist)["total"])
+    nlist_before = ff.neighbor_fn.update(R, ff.nlist)
+    E_before = float(ff.energy_fn(R, nlist_before)["total"])
 
     trial, _pf6_molid = propose_reaction_trial(
         sys, cand,
@@ -275,7 +272,19 @@ def maybe_react_one_event(
         dr_threshold=float(ff.nb_options.dr_threshold),
     )
 
-    E_after = float(ff_trial.energy_fn(R_probe, ff_trial.nlist)["total"])
+    # --- NEW: FIRE relaxation under trial topology ---
+    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+      R,                # relax starting from this configuration
+      ff_trial=ff_trial,
+      shift_fn=shift_fn,
+      n_steps=30,
+      dt_start=1e-3,
+      f_inc=1.01,
+      dt_max=1e-2,
+      n_min=2,
+    )
+
+    E_after = float(ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"])
     dE = E_after - E_before
 
     key, accepted, p_acc = accept_reject(key, dE, beta)
@@ -284,7 +293,7 @@ def maybe_react_one_event(
             "candidate": (cand.k_pf6, cand.li_idx, cand.leave_F, cand.dmin),
             "dE": dE,
             "p_acc": p_acc,
-        }
+        },R
 
     # accepted: update sys and pf6_reacted flag
     pf6_reacted_np[cand.k_pf6] = True
@@ -304,5 +313,49 @@ def maybe_react_one_event(
         "accepted_event": (cand.k_pf6, cand.li_idx, cand.leave_F, cand.dmin),
         "dE": dE,
         "p_acc": p_acc,
-    }
+        },R_relaxed
+
+def fire_relax_with_nlist(
+    R0: jnp.ndarray,
+    *,
+    ff_trial,
+    shift_fn,
+    n_steps: int = 30,
+    dt_start: float = 1e-3,
+    f_inc: float = 1.01,
+    dt_max: float = 1e-2,
+    n_min: int = 2,
+):
+    """
+    Run FIRE minimization under ff_trial, updating the neighbor list each iteration.
+    Returns (R_relaxed, nlist_relaxed).
+    """
+    # FIRE expects energy_fn(position, **kwargs) -> scalar
+    def energy_scalar(R, *, nlist):
+        return ff_trial.energy_fn(R, nlist)["total"]
+
+    fire_init, fire_apply = fire_descent(
+        energy_scalar,
+        shift_fn,
+        dt_start=dt_start,
+        f_inc=f_inc,
+        dt_max=dt_max,
+        n_min=n_min,
+    )
+    fire_apply = jax.jit(fire_apply)
+    update_nlist = jax.jit(ff_trial.neighbor_fn.update)
+
+    nlist = ff_trial.neighbor_fn.allocate(R0)
+    fire_state = fire_init(R0, nlist=nlist)
+
+    @jax.jit
+    def step_fire_fn(i, carry):
+        st, nl = carry
+        # update FIRST to match current position
+        nl = update_nlist(st.position, nl)
+        st = fire_apply(st, nlist=nl)
+        return st, nl
+
+    fire_state, nlist = jax.lax.fori_loop(0, n_steps, step_fire_fn, (fire_state, nlist))
+    return fire_state.position, nlist
 
