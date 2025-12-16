@@ -55,8 +55,9 @@ def test_md_driver_runs_with_dummy_forcefield():
 
     #shift_fn = lambda R, dR: R + dR
     shift_fn = lambda R, dR, **kwargs: R + dR
+
     def reaction_step_fn(key, positions, ff_in, sys_in):
-        return key, False, ff_in, sys_in, {}
+        return key, False, ff_in, sys_in, {}, positions
 
     res = run_md_nvt_with_reactions(
         jax.random.PRNGKey(0),
