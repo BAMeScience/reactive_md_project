@@ -25,3 +25,8 @@ class SimConfig:
     tau_T: float = 100.0  # Nose-Hoover tau
     prng_seed: int = 0
 
+    # Logging
+    log_file: str = "reactive_md.log"
+    log_to_console: bool = True
+    log_level: str = "INFO"   # DEBUG / INFO / WARNING / ERROR
+

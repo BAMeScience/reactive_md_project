@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import argparse
 from pathlib import Path
+import logging
+
 import jax
 import jax.numpy as jnp
 from jax_md import space
@@ -16,21 +18,46 @@ from .forcefield import build_forcefield
 from .reaction import SystemState, maybe_react_one_event
 from .md_driver import run_md_nvt_with_reactions
 
+
+def _setup_logger(cfg: SimConfig) -> logging.Logger:
+    logger = logging.getLogger("reactive_md")
+    logger.setLevel(getattr(logging, cfg.log_level.upper(), logging.INFO))
+    logger.handlers.clear()
+    logger.propagate = False
+
+    fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    fh = logging.FileHandler(cfg.log_file, mode="w")  # use "a" to append
+    fh.setFormatter(fmt)
+    logger.addHandler(fh)
+
+    if cfg.log_to_console:
+        sh = logging.StreamHandler()
+        sh.setFormatter(fmt)
+        logger.addHandler(sh)
+
+    logger.info("Logging started")
+    logger.info(f"Config: {cfg}")
+    return logger
+
+
 def main(cfg: SimConfig):
+    logger = _setup_logger(cfg)
+
     positions, bonds, angles, torsions, impropers, nonbonded, molecule_id, box, masses, atom_types = parse_lammps_data(
         cfg.data_file, cfg.settings_file
     )
 
     angle_theta0 = np.array(angles[2])
     if angle_theta0.size:
-       print("[debug] theta0 stats:", angle_theta0.min(), angle_theta0.max())
+        logger.debug(f"[debug] theta0 stats: min={angle_theta0.min()} max={angle_theta0.max()}")
     else:
-       print("[debug] theta0 stats: (no angles)")
+        logger.debug("[debug] theta0 stats: (no angles)")
 
     charges, sigmas, epsilons, pair_indices, is_14_mask = nonbonded
 
     n_atoms = positions.shape[0]
-    print(f"Loaded: n_atoms={n_atoms}, bonds={bonds[0].shape[0]}, angles={angles[0].shape[0]}")
+    logger.info(f"Loaded: n_atoms={n_atoms}, bonds={bonds[0].shape[0]}, angles={angles[0].shape[0]}")
 
     # Discover PF6 and Li
     pf6_atoms, li_atoms = discover_pf6_and_li(
@@ -38,14 +65,13 @@ def main(cfg: SimConfig):
         p_type=cfg.p_type, f_type=cfg.f_type, li_type=cfg.li_type
     )
     if pf6_atoms.shape[0] > 0:
-        print("First PF6 block indices:", pf6_atoms[0])
-        print("First PF6 block types:", np.array(atom_types)[pf6_atoms[0]])
+        logger.debug(f"First PF6 block indices: {pf6_atoms[0]}")
+        logger.debug(f"First PF6 block types: {np.array(atom_types)[pf6_atoms[0]]}")
     if li_atoms.shape[0] > 0:
-        print("First Li index:", li_atoms[0], "type:", np.array(atom_types)[li_atoms[0]])
+        logger.debug(f"First Li index: {li_atoms[0]} type: {np.array(atom_types)[li_atoms[0]]}")
 
     disp_periodic, shift_fn = space.periodic(box)
 
-    # Build initial forcefield bundle
     ff = build_forcefield(
         R=jnp.array(positions),
         box=box,
@@ -61,7 +87,6 @@ def main(cfg: SimConfig):
         dr_threshold=cfg.dr_threshold,
     )
 
-    # SystemState wrapper (things that can change after reaction)
     sys = SystemState(
         bonds=(jnp.array(bonds[0], dtype=int), jnp.array(bonds[1]), jnp.array(bonds[2])),
         angles=(jnp.array(angles[0], dtype=int), jnp.array(angles[1]), jnp.array(angles[2])),
@@ -97,6 +122,7 @@ def main(cfg: SimConfig):
             li_type=cfg.li_type,
             r_on=cfg.r_on,
             beta=beta,
+            logger=logger,  # NEW: let reaction.py log "no candidate"/"skipping"
         )
 
     key = jax.random.PRNGKey(cfg.prng_seed)
@@ -110,36 +136,29 @@ def main(cfg: SimConfig):
         ff=ff,
         sys=sys,
         reaction_step_fn=reaction_step_fn,
+        logger=logger,
     )
 
 
 def cli():
     parser = argparse.ArgumentParser(description="Reactive OPLS-AA MD (JAX-MD)")
-    parser.add_argument(
-        "--data",
-        required=True,
-        help="LAMMPS data file",
-    )
-    parser.add_argument(
-        "--settings",
-        required=True,
-        help="LAMMPS settings file",
-    )
-    parser.add_argument(
-        "--steps",
-        type=int,
-        default=None,
-        help="Number of MD steps (override config)",
-    )
+    parser.add_argument("--data", required=True, help="LAMMPS data file")
+    parser.add_argument("--settings", required=True, help="LAMMPS settings file")
+    parser.add_argument("--steps", type=int, default=None, help="Number of MD steps (override config)")
+    parser.add_argument("--log", type=str, default=None, help="Log file path (override config.log_file)")
+    parser.add_argument("--log-level", type=str, default=None, help="Logging level (override config.log_level)")
     args = parser.parse_args()
 
     cfg = SimConfig(
         data_file=str(Path(args.data).expanduser().resolve()),
         settings_file=str(Path(args.settings).expanduser().resolve()),
         steps=args.steps if args.steps is not None else SimConfig.steps,
+        log_file=args.log if args.log is not None else SimConfig.log_file,
+        log_level=args.log_level if args.log_level is not None else SimConfig.log_level,
     )
 
     main(cfg)
+
 
 if __name__ == "__main__":
     cli()
