@@ -128,17 +128,20 @@ def main(cfg: SimConfig):
     key = jax.random.PRNGKey(cfg.prng_seed)
 
     _result = run_md_nvt_with_reactions(
-        key,
-        cfg=cfg,
-        init_positions=jnp.array(positions),
-        masses=masses,
-        shift_fn=shift_fn,
-        ff=ff,
-        sys=sys,
-        reaction_step_fn=reaction_step_fn,
-        logger=logger,
+     key,
+     cfg=cfg,
+     init_positions=jnp.array(positions),
+     masses=masses,
+     shift_fn=shift_fn,
+     ff=ff,
+     sys=sys,
+     reaction_step_fn=reaction_step_fn,
+     logger=logger,
+     box=box,                 # NEW
+     atom_types=atom_types,   # NEW
+     dump_filename="dump_mixture_nvt_nh_unwrapped.lammpstrj",  # optional
+     write_every=cfg.check_every,                               # optional
     )
-
 
 def cli():
     parser = argparse.ArgumentParser(description="Reactive OPLS-AA MD (JAX-MD)")
