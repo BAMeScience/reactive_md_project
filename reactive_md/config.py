@@ -12,8 +12,6 @@ class SimConfig:
     check_every: int = 100
     max_events: int = 9999
 
-    # Reaction geometry gates, in Angstrom.
-    # Old r_on=4.0 was too permissive for a Li-F reaction contact.
     r_lif_on: float = 2.4
     r_pf_break: float = 1.9
     r_pf_probe: float = 4.0
@@ -30,3 +28,6 @@ class SimConfig:
 
     tau_T: float = 100.0
     prng_seed: int = 0
+
+    dump_file: str | None = None
+    dump_every: int | None = None

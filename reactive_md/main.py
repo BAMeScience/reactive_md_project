@@ -16,6 +16,7 @@ from .topology_opls import discover_pf6_and_li
 from .forcefield import build_forcefield
 from .reaction import SystemState, maybe_react_one_event
 from .md_driver import run_md_nvt_with_reactions
+from .lammps_io import write_lammps_dump_frame
 
 
 def main(cfg: SimConfig):
@@ -34,9 +35,16 @@ def main(cfg: SimConfig):
 
     charges, sigmas, epsilons, pair_indices, is_14_mask = nonbonded
 
-    n_atoms = positions.shape[0]
+    positions = np.asarray(positions)
+    masses = np.asarray(masses)
+    atom_types = np.asarray(atom_types, dtype=np.int32)
+    molecule_id = np.asarray(molecule_id, dtype=np.int32)
+    box = np.asarray(box)
+
+    atom_ids = np.arange(1, positions.shape[0] + 1, dtype=np.int32)
+
     print(
-        f"Loaded: n_atoms={n_atoms}, "
+        f"Loaded: n_atoms={positions.shape[0]}, "
         f"bonds={bonds[0].shape[0]}, "
         f"angles={angles[0].shape[0]}"
     )
@@ -57,12 +65,17 @@ def main(cfg: SimConfig):
         f"d_PF > {cfg.r_pf_break:.3f} Å"
     )
 
+    if cfg.dump_file is not None:
+        dump_every = cfg.dump_every if cfg.dump_every is not None else cfg.check_every
+        print(f"Writing LAMMPS dump trajectory to: {cfg.dump_file}")
+        print(f"Trajectory write interval: every {dump_every} steps")
+
     if pf6_atoms.shape[0] > 0:
         print("First PF6 block indices:", pf6_atoms[0])
-        print("First PF6 block types:", np.array(atom_types)[pf6_atoms[0]])
+        print("First PF6 block types:", atom_types[pf6_atoms[0]])
 
     if li_atoms.shape[0] > 0:
-        print("First Li index:", li_atoms[0], "type:", np.array(atom_types)[li_atoms[0]])
+        print("First Li index:", li_atoms[0], "type:", atom_types[li_atoms[0]])
 
     disp_periodic, shift_fn = space.periodic(box)
 
@@ -90,7 +103,7 @@ def main(cfg: SimConfig):
         charges=np.array(charges, dtype=np.float32),
         sigmas=np.array(sigmas, dtype=np.float32),
         epsilons=np.array(epsilons, dtype=np.float32),
-        molecule_id=np.array(molecule_id, dtype=np.int32),
+        molecule_id=molecule_id,
         r_cut=cfg.r_cut,
         dr_threshold=cfg.dr_threshold,
     )
@@ -154,16 +167,39 @@ def main(cfg: SimConfig):
 
     key = jax.random.PRNGKey(cfg.prng_seed)
 
-    _result = run_md_nvt_with_reactions(
-        key,
-        cfg=cfg,
-        init_positions=jnp.array(positions),
-        masses=masses,
-        shift_fn=shift_fn,
-        ff=ff,
-        sys=sys,
-        reaction_step_fn=reaction_step_fn,
-    )
+    if cfg.dump_file is None:
+        _result = run_md_nvt_with_reactions(
+            key,
+            cfg=cfg,
+            init_positions=jnp.array(positions),
+            masses=masses,
+            shift_fn=shift_fn,
+            ff=ff,
+            sys=sys,
+            reaction_step_fn=reaction_step_fn,
+            box=box,
+            atom_ids=atom_ids,
+            atom_types=atom_types,
+            dump_file=None,
+            dump_writer=None,
+        )
+    else:
+        with open(cfg.dump_file, "w") as dump_file:
+            _result = run_md_nvt_with_reactions(
+                key,
+                cfg=cfg,
+                init_positions=jnp.array(positions),
+                masses=masses,
+                shift_fn=shift_fn,
+                ff=ff,
+                sys=sys,
+                reaction_step_fn=reaction_step_fn,
+                box=box,
+                atom_ids=atom_ids,
+                atom_types=atom_types,
+                dump_file=dump_file,
+                dump_writer=write_lammps_dump_frame,
+            )
 
 
 def cli():
@@ -172,71 +208,43 @@ def cli():
     parser.add_argument("--data", required=True, help="LAMMPS data file")
     parser.add_argument("--settings", required=True, help="LAMMPS settings file")
 
+    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--check-every", type=int, default=None)
+
+    parser.add_argument("--r-lif-on", type=float, default=None)
+    parser.add_argument("--r-pf-break", type=float, default=None)
+    parser.add_argument("--r-pf-probe", type=float, default=None)
+
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+
     parser.add_argument(
-        "--steps",
+        "--dump-file",
+        default=None,
+        help="LAMMPS dump trajectory output file",
+    )
+    parser.add_argument(
+        "--dump-every",
         type=int,
         default=None,
-        help="Number of MD steps",
-    )
-    parser.add_argument(
-        "--check-every",
-        type=int,
-        default=None,
-        help="MD steps per reaction check / print chunk",
-    )
-    parser.add_argument(
-        "--r-lif-on",
-        type=float,
-        default=None,
-        help="Li-F contact cutoff for reaction candidate, Angstrom",
-    )
-    parser.add_argument(
-        "--r-pf-break",
-        type=float,
-        default=None,
-        help="Minimum stretched P-F distance for leaving F, Angstrom",
-    )
-    parser.add_argument(
-        "--r-pf-probe",
-        type=float,
-        default=None,
-        help="Probe P-F distance used before product relaxation, Angstrom",
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=None,
-        help="Temperature in K",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="JAX PRNG seed",
+        help="Write trajectory every N MD steps. Defaults to check_every.",
     )
 
     args = parser.parse_args()
-
     default_cfg = SimConfig()
 
     cfg = SimConfig(
         data_file=str(Path(args.data).expanduser().resolve()),
         settings_file=str(Path(args.settings).expanduser().resolve()),
         steps=args.steps if args.steps is not None else default_cfg.steps,
-        check_every=(
-            args.check_every if args.check_every is not None else default_cfg.check_every
-        ),
+        check_every=args.check_every if args.check_every is not None else default_cfg.check_every,
         r_lif_on=args.r_lif_on if args.r_lif_on is not None else default_cfg.r_lif_on,
-        r_pf_break=(
-            args.r_pf_break if args.r_pf_break is not None else default_cfg.r_pf_break
-        ),
-        r_pf_probe=(
-            args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe
-        ),
-        temperature_k=(
-            args.temperature if args.temperature is not None else default_cfg.temperature_k
-        ),
+        r_pf_break=args.r_pf_break if args.r_pf_break is not None else default_cfg.r_pf_break,
+        r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
+        temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,
+        dump_file=args.dump_file,
+        dump_every=args.dump_every,
     )
 
     main(cfg)

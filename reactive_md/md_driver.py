@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from functools import partial
 
+import numpy as np
 import jax
 import jax.numpy as jnp
 from jax_md import simulate
@@ -21,6 +22,35 @@ class RunResult:
     accepted_events: int
 
 
+def _write_dump_frame_if_requested(
+    *,
+    dump_file,
+    dump_writer,
+    step: int,
+    box,
+    atom_ids,
+    atom_types,
+    masses,
+    wrapped_positions,
+    unwrapped_positions,
+):
+    if dump_file is None or dump_writer is None:
+        return
+
+    dump_writer(
+        file=dump_file,
+        step=step,
+        box=box,
+        atom_ids=atom_ids,
+        atom_types=atom_types,
+        masses=np.asarray(masses),
+        wrapped_positions=np.asarray(jax.device_get(wrapped_positions)),
+        unwrapped_positions=np.asarray(jax.device_get(unwrapped_positions)),
+    )
+
+    dump_file.flush()
+
+
 def run_md_nvt_with_reactions(
     key,
     *,
@@ -31,15 +61,12 @@ def run_md_nvt_with_reactions(
     ff: FFBundle,
     sys: SystemState,
     reaction_step_fn,
+    box=None,
+    atom_ids=None,
+    atom_types=None,
+    dump_file=None,
+    dump_writer=None,
 ):
-    """
-    Chunked NVT Nose-Hoover integration plus periodic reaction attempts.
-
-    Important implementation detail:
-    the MD propagation chunk is JIT-compiled as a reusable function with a
-    static chunk length. This avoids building a huge XLA program for very long
-    runs and reduces the chance of GPU executable-memory OOMs.
-    """
     kT = cfg.kb_real * cfg.temperature_k
     mass = jnp.asarray(masses)
 
@@ -82,6 +109,25 @@ def run_md_nvt_with_reactions(
     key, sub = jax.random.split(key)
     md_state = init_nvt(sub, init_positions, neighbor=ff.nlist)
 
+    unwrapped_position = jnp.array(init_positions)
+    previous_position = jnp.array(init_positions)
+
+    dump_every = cfg.dump_every
+    if dump_every is None:
+        dump_every = cfg.check_every
+
+    _write_dump_frame_if_requested(
+        dump_file=dump_file,
+        dump_writer=dump_writer,
+        step=0,
+        box=box,
+        atom_ids=atom_ids,
+        atom_types=atom_types,
+        masses=masses,
+        wrapped_positions=md_state.position,
+        unwrapped_positions=unwrapped_position,
+    )
+
     accepted_events = 0
     steps_done = 0
 
@@ -91,10 +137,13 @@ def run_md_nvt_with_reactions(
         md_state, ff.nlist = md_chunk(md_state, ff.nlist, chunk)
         steps_done += chunk
 
+        displacement = ff.disp_fn(previous_position, md_state.position)
+        unwrapped_position = unwrapped_position + displacement
+        previous_position = md_state.position
+
         positions = md_state.position
         velocities = md_state.velocity
 
-        # Force synchronization here so errors occur at a clear boundary.
         E_dict = ff.energy_fn(positions, ff.nlist)
         E_total = E_dict["total"]
         E_total.block_until_ready()
@@ -106,6 +155,19 @@ def run_md_nvt_with_reactions(
 
         reacted = int(jnp.sum(sys.pf6_reacted))
         print(f"[step {steps_done:6d}] PE={PE: .6f} KE={KE: .6f} reacted={reacted}")
+
+        if steps_done % int(dump_every) == 0:
+            _write_dump_frame_if_requested(
+                dump_file=dump_file,
+                dump_writer=dump_writer,
+                step=steps_done,
+                box=box,
+                atom_ids=atom_ids,
+                atom_types=atom_types,
+                masses=masses,
+                wrapped_positions=md_state.position,
+                unwrapped_positions=unwrapped_position,
+            )
 
         key, accepted, ff_new, sys_new, info, R_new = reaction_step_fn(
             key,
@@ -124,10 +186,25 @@ def run_md_nvt_with_reactions(
             ff = ff_new
             sys = sys_new
 
+            reaction_displacement = ff.disp_fn(previous_position, R_new)
+            unwrapped_position = unwrapped_position + reaction_displacement
+            previous_position = R_new
+
             md_state = replace(md_state, position=R_new)
             ff.nlist = ff.neighbor_fn.allocate(R_new)
 
-            # The topology and energy function changed, so rebuild integrator/chunk.
+            _write_dump_frame_if_requested(
+                dump_file=dump_file,
+                dump_writer=dump_writer,
+                step=steps_done,
+                box=box,
+                atom_ids=atom_ids,
+                atom_types=atom_types,
+                masses=masses,
+                wrapped_positions=md_state.position,
+                unwrapped_positions=unwrapped_position,
+            )
+
             init_nvt, apply_nvt = make_integrator(ff.energy_fn)
             md_chunk = make_md_chunk(apply_nvt, ff.neighbor_fn)
 
