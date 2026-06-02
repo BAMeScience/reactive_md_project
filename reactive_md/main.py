@@ -155,7 +155,66 @@ def main(cfg: SimConfig):
 
     pf5 = make_pf5_template()
     lif = make_lif_template()
-    beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
+
+
+    mc_energy_evaluator = None
+
+    if cfg.use_mace_mc:
+       from .mace_setup import build_mace_model
+       from .mace_energy import build_mace_energy_system
+       from .mace_mc_energy import MaceJaxEnergyEvaluator
+
+       type_to_Z = {
+        1: 6,   # C
+        2: 8,   # O
+        3: 8,   # O
+        4: 6,   # C
+        5: 1,   # H
+        6: 15,  # P
+        7: 9,   # F
+        8: 3,   # Li
+       }
+
+       z_atomic = np.array([type_to_Z[int(t)] for t in atom_types], dtype=np.int32)
+
+       jax_model, jax_model_config, _torch_config = build_mace_model(
+          source=cfg.mace_source,
+          variant=cfg.mace_variant,
+       )
+
+       (
+         _mace_disp_fn,
+         _mace_shift_fn,
+         mace_neighbor_fn,
+         mace_make_energy_fn,
+       ) = build_mace_energy_system(
+         jax_model=jax_model,
+         jax_model_config=jax_model_config,
+         z_atomic=z_atomic,
+         box0=box,
+         ensemble="nve",
+         dr_threshold=cfg.mace_dr_threshold,
+         capacity_multiplier=cfg.mace_capacity_multiplier,
+       )
+
+       mc_energy_evaluator = MaceJaxEnergyEvaluator(
+         neighbor_fn=mace_neighbor_fn,
+         make_energy_fn=mace_make_energy_fn,
+         box0=box,
+       )
+
+       print("Metropolis energy: MACE-JAX")
+    else:
+       print("Metropolis energy: classical force field")
+
+    # ------------------------------------
+      # Beta depends on energy units
+    # ------------------------------------
+
+    if cfg.use_mace_mc:
+       beta = 1.0 / (8.617333262e-5 * cfg.temperature_k)
+    else:
+       beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
     def reaction_step_fn(key, R, ff_in, sys_in):
         return maybe_react_one_event(
@@ -177,6 +236,7 @@ def main(cfg: SimConfig):
             r_pf_break=cfg.r_pf_break,
             r_pf_probe=cfg.r_pf_probe,
             beta=beta,
+            mc_energy_evaluator=mc_energy_evaluator,
         )
 
     key = jax.random.PRNGKey(cfg.prng_seed)
@@ -210,6 +270,9 @@ def main(cfg: SimConfig):
 
 
 def cli():
+  
+    default_cfg = SimConfig()
+
     parser = argparse.ArgumentParser(description="Reactive OPLS-AA MD using JAX-MD")
 
     parser.add_argument("--data", required=True, help="LAMMPS data file")
@@ -242,8 +305,22 @@ def cli():
         help="CSV event log for accepted topology-changing reactions. Use .gz for gzip.",
     )
 
+    parser.add_argument(
+    "--use-mace-mc",
+    action="store_true",
+    help="Use MACE-JAX energies for Metropolis acceptance only.",
+    ) 
+
+    parser.add_argument("--mace-source", default=default_cfg.mace_source)
+    parser.add_argument("--mace-variant", default=default_cfg.mace_variant)
+    parser.add_argument("--mace-dr-threshold", type=float, default=default_cfg.mace_dr_threshold)
+    parser.add_argument(
+      "--mace-capacity-multiplier",
+      type=float,
+      default=default_cfg.mace_capacity_multiplier,
+    )
+
     args = parser.parse_args()
-    default_cfg = SimConfig()
 
     cfg = SimConfig(
         data_file=str(Path(args.data).expanduser().resolve()),
@@ -266,6 +343,13 @@ def cli():
             if args.event_log_file is not None
             else None
         ),
+
+        use_mace_mc=args.use_mace_mc,
+        mace_source=args.mace_source,
+        mace_variant=args.mace_variant,
+        mace_dr_threshold=args.mace_dr_threshold,
+        mace_capacity_multiplier=args.mace_capacity_multiplier
+
     )
 
     main(cfg)

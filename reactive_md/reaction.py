@@ -336,6 +336,7 @@ def maybe_react_one_event(
     r_pf_break: float,
     r_pf_probe: float,
     beta: float,
+    mc_energy_evaluator=None,
 ):
     """
     Attempt one PF6 -> PF5 + LiF reaction.
@@ -379,10 +380,13 @@ def maybe_react_one_event(
 
         return key, False, ff, sys, info, R
 
-    nlist_before = ff.neighbor_fn.update(R, ff.nlist)
-    E_before_arr = ff.energy_fn(R, nlist_before)["total"]
-    E_before_arr.block_until_ready()
-    E_before = float(E_before_arr)
+    if mc_energy_evaluator is None:
+       nlist_before = ff.neighbor_fn.update(R, ff.nlist)
+       E_before_arr = ff.energy_fn(R, nlist_before)["total"]
+       E_before_arr.block_until_ready()
+       E_before = float(E_before_arr)
+    else:
+       E_before = mc_energy_evaluator.energy(R)
 
     trial, _pf6_molid = propose_reaction_trial(
         sys,
@@ -439,9 +443,12 @@ def maybe_react_one_event(
         n_min=2,
     )
 
-    E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
-    E_after_arr.block_until_ready()
-    E_after = float(E_after_arr)
+    if mc_energy_evaluator is None:
+       E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
+       E_after_arr.block_until_ready()
+       E_after = float(E_after_arr)
+    else:
+       E_after = mc_energy_evaluator.energy(R_relaxed)
 
     dE = E_after - E_before
     key, accepted, p_acc = accept_reject(key, dE, beta)

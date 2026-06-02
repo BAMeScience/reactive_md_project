@@ -13,7 +13,7 @@ class SimConfig:
     max_events: int = 9999
 
     r_lif_on: float = 2.4
-    r_pf_break: float = 1.65
+    r_pf_break: float = 1.61
     r_pf_probe: float = 4.0
 
     temperature_k: float = 400.0
@@ -32,3 +32,9 @@ class SimConfig:
     dump_file: str | None = None
     dump_every: int | None = None
     event_log_file: str | None = None
+
+    use_mace_mc: bool = False
+    mace_source: str = "mp"
+    mace_variant: str = "medium"
+    mace_dr_threshold: float = 0.5
+    mace_capacity_multiplier: float = 1.25
