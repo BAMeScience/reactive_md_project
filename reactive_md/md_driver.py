@@ -69,6 +69,7 @@ def run_md_nvt_with_reactions(
 ):
     kT = cfg.kb_real * cfg.temperature_k
     mass = jnp.asarray(masses)
+    batched_disp_fn = jax.vmap(ff.disp_fn, in_axes=(0, 0))
 
     def make_integrator(energy_fn):
         def energy_scalar(R, neighbor):
@@ -137,7 +138,7 @@ def run_md_nvt_with_reactions(
         md_state, ff.nlist = md_chunk(md_state, ff.nlist, chunk)
         steps_done += chunk
 
-        displacement = ff.disp_fn(previous_position, md_state.position)
+        displacement = batched_disp_fn(previous_position, md_state.position)
         unwrapped_position = unwrapped_position + displacement
         previous_position = md_state.position
 
@@ -183,10 +184,12 @@ def run_md_nvt_with_reactions(
                 f"dE={info.get('dE'):.4f}, p={info.get('p_acc'):.3f}"
             )
 
+
             ff = ff_new
             sys = sys_new
+            batched_disp_fn = jax.vmap(ff.disp_fn, in_axes=(0, 0))
 
-            reaction_displacement = ff.disp_fn(previous_position, R_new)
+            reaction_displacement = batched_disp_fn(previous_position, R_new)
             unwrapped_position = unwrapped_position + reaction_displacement
             previous_position = R_new
 
