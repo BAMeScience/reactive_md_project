@@ -47,8 +47,53 @@ def _write_dump_frame_if_requested(
         wrapped_positions=np.asarray(jax.device_get(wrapped_positions)),
         unwrapped_positions=np.asarray(jax.device_get(unwrapped_positions)),
     )
-
     dump_file.flush()
+
+
+def _write_event_header(event_file):
+    if event_file is None:
+        return
+
+    event_file.write(
+        "step,event,event_index,pf6_index,li_idx,leave_F,"
+        "d_lif,d_pf,q_pf_minus_lif,dE,p_acc,reacted_count\n"
+    )
+    event_file.flush()
+
+
+def _write_accepted_event(
+    *,
+    event_file,
+    step: int,
+    event_index: int,
+    info: dict,
+    reacted_count: int,
+):
+    if event_file is None:
+        return
+
+    event = info.get("accepted_event", {})
+    d_lif = event.get("d_lif")
+    d_pf = event.get("d_pf")
+
+    if d_lif is not None and d_pf is not None:
+        q_pf_minus_lif = float(d_pf) - float(d_lif)
+    else:
+        q_pf_minus_lif = ""
+
+    event_file.write(
+        f"{step},accepted,{event_index},"
+        f"{event.get('k_pf6')},"
+        f"{event.get('li_idx')},"
+        f"{event.get('leave_F')},"
+        f"{d_lif},"
+        f"{d_pf},"
+        f"{q_pf_minus_lif},"
+        f"{info.get('dE')},"
+        f"{info.get('p_acc')},"
+        f"{reacted_count}\n"
+    )
+    event_file.flush()
 
 
 def run_md_nvt_with_reactions(
@@ -66,9 +111,11 @@ def run_md_nvt_with_reactions(
     atom_types=None,
     dump_file=None,
     dump_writer=None,
+    event_file=None,
 ):
     kT = cfg.kb_real * cfg.temperature_k
     mass = jnp.asarray(masses)
+
     batched_disp_fn = jax.vmap(ff.disp_fn, in_axes=(0, 0))
 
     def make_integrator(energy_fn):
@@ -116,6 +163,8 @@ def run_md_nvt_with_reactions(
     dump_every = cfg.dump_every
     if dump_every is None:
         dump_every = cfg.check_every
+
+    _write_event_header(event_file)
 
     _write_dump_frame_if_requested(
         dump_file=dump_file,
@@ -179,11 +228,36 @@ def run_md_nvt_with_reactions(
 
         if accepted:
             accepted_events += 1
+            event = info.get("accepted_event", {})
+
+            reacted_count_new = int(jnp.sum(sys_new.pf6_reacted))
+
+            d_lif = event.get("d_lif")
+            d_pf = event.get("d_pf")
+            q_text = ""
+            if d_lif is not None and d_pf is not None:
+                q_text = f", q=d_PF-d_LiF={float(d_pf) - float(d_lif):.3f}"
+
             print(
-                f" Accepted event #{accepted_events}: {info.get('accepted_event')}, "
-                f"dE={info.get('dE'):.4f}, p={info.get('p_acc'):.3f}"
+                f"[step {steps_done}] TOPOLOGY CHANGE accepted "
+                f"event #{accepted_events}: "
+                f"pf6={event.get('k_pf6')}, "
+                f"Li={event.get('li_idx')}, "
+                f"F={event.get('leave_F')}, "
+                f"d_LiF={float(d_lif):.3f}, "
+                f"d_PF={float(d_pf):.3f}"
+                f"{q_text}, "
+                f"dE={float(info.get('dE')):.4f}, "
+                f"p={float(info.get('p_acc')):.3f}"
             )
 
+            _write_accepted_event(
+                event_file=event_file,
+                step=steps_done,
+                event_index=accepted_events,
+                info=info,
+                reacted_count=reacted_count_new,
+            )
 
             ff = ff_new
             sys = sys_new
@@ -196,6 +270,8 @@ def run_md_nvt_with_reactions(
             md_state = replace(md_state, position=R_new)
             ff.nlist = ff.neighbor_fn.allocate(R_new)
 
+            # Write a post-reaction frame at the same step. This makes topology
+            # changes visible even when they occur between normal dump intervals.
             _write_dump_frame_if_requested(
                 dump_file=dump_file,
                 dump_writer=dump_writer,

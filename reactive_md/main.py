@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+from contextlib import ExitStack
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +19,12 @@ from .forcefield import build_forcefield
 from .reaction import SystemState, maybe_react_one_event
 from .md_driver import run_md_nvt_with_reactions
 from .lammps_io import write_lammps_dump_frame
+
+
+def _open_text_output(path: str):
+    if path.endswith(".gz"):
+        return gzip.open(path, "wt")
+    return open(path, "w")
 
 
 def main(cfg: SimConfig):
@@ -69,6 +77,13 @@ def main(cfg: SimConfig):
         dump_every = cfg.dump_every if cfg.dump_every is not None else cfg.check_every
         print(f"Writing LAMMPS dump trajectory to: {cfg.dump_file}")
         print(f"Trajectory write interval: every {dump_every} steps")
+        if cfg.dump_file.endswith(".gz"):
+            print("Trajectory compression: gzip")
+
+    if cfg.event_log_file is not None:
+        print(f"Writing reaction event log to: {cfg.event_log_file}")
+        if cfg.event_log_file.endswith(".gz"):
+            print("Event log compression: gzip")
 
     if pf6_atoms.shape[0] > 0:
         print("First PF6 block indices:", pf6_atoms[0])
@@ -77,7 +92,7 @@ def main(cfg: SimConfig):
     if li_atoms.shape[0] > 0:
         print("First Li index:", li_atoms[0], "type:", atom_types[li_atoms[0]])
 
-    disp_periodic, shift_fn = space.periodic(box)
+    _disp_periodic, shift_fn = space.periodic(box)
 
     ff = build_forcefield(
         R=jnp.array(positions),
@@ -140,7 +155,6 @@ def main(cfg: SimConfig):
 
     pf5 = make_pf5_template()
     lif = make_lif_template()
-
     beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
     def reaction_step_fn(key, R, ff_in, sys_in):
@@ -167,7 +181,16 @@ def main(cfg: SimConfig):
 
     key = jax.random.PRNGKey(cfg.prng_seed)
 
-    if cfg.dump_file is None:
+    with ExitStack() as stack:
+        dump_file = None
+        event_file = None
+
+        if cfg.dump_file is not None:
+            dump_file = stack.enter_context(_open_text_output(cfg.dump_file))
+
+        if cfg.event_log_file is not None:
+            event_file = stack.enter_context(_open_text_output(cfg.event_log_file))
+
         _result = run_md_nvt_with_reactions(
             key,
             cfg=cfg,
@@ -180,26 +203,10 @@ def main(cfg: SimConfig):
             box=box,
             atom_ids=atom_ids,
             atom_types=atom_types,
-            dump_file=None,
-            dump_writer=None,
+            dump_file=dump_file,
+            dump_writer=write_lammps_dump_frame if dump_file is not None else None,
+            event_file=event_file,
         )
-    else:
-        with open(cfg.dump_file, "w") as dump_file:
-            _result = run_md_nvt_with_reactions(
-                key,
-                cfg=cfg,
-                init_positions=jnp.array(positions),
-                masses=masses,
-                shift_fn=shift_fn,
-                ff=ff,
-                sys=sys,
-                reaction_step_fn=reaction_step_fn,
-                box=box,
-                atom_ids=atom_ids,
-                atom_types=atom_types,
-                dump_file=dump_file,
-                dump_writer=write_lammps_dump_frame,
-            )
 
 
 def cli():
@@ -221,13 +228,18 @@ def cli():
     parser.add_argument(
         "--dump-file",
         default=None,
-        help="LAMMPS dump trajectory output file",
+        help="LAMMPS dump trajectory output file. Use .gz for gzip compression.",
     )
     parser.add_argument(
         "--dump-every",
         type=int,
         default=None,
         help="Write trajectory every N MD steps. Defaults to check_every.",
+    )
+    parser.add_argument(
+        "--event-log-file",
+        default=None,
+        help="CSV event log for accepted topology-changing reactions. Use .gz for gzip.",
     )
 
     args = parser.parse_args()
@@ -243,8 +255,17 @@ def cli():
         r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
         temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,
-        dump_file=args.dump_file,
+        dump_file=(
+            str(Path(args.dump_file).expanduser().resolve())
+            if args.dump_file is not None
+            else None
+        ),
         dump_every=args.dump_every,
+        event_log_file=(
+            str(Path(args.event_log_file).expanduser().resolve())
+            if args.event_log_file is not None
+            else None
+        ),
     )
 
     main(cfg)

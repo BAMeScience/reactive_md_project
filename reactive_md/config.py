@@ -13,7 +13,7 @@ class SimConfig:
     max_events: int = 9999
 
     r_lif_on: float = 2.4
-    r_pf_break: float = 1.9
+    r_pf_break: float = 1.65
     r_pf_probe: float = 4.0
 
     temperature_k: float = 400.0
@@ -31,3 +31,4 @@ class SimConfig:
 
     dump_file: str | None = None
     dump_every: int | None = None
+    event_log_file: str | None = None
