@@ -1,4 +1,4 @@
-# reactive_md/topology_ops.py
+# reactive_md/topology_opls.py
 from __future__ import annotations
 import numpy as np
 

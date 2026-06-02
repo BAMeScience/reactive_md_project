@@ -1,7 +1,9 @@
 # reactive_md/reaction.py
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any, Optional
+
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -14,68 +16,161 @@ from .forcefield import FFBundle, build_forcefield
 
 @dataclass
 class SystemState:
-    bonds: tuple  # (bond_idx, k_b, r0)
-    angles: tuple # (angle_idx, k_theta, theta0)
-    torsions: tuple  # (idx, k, n, gamma)
-    impropers: tuple # (idx, k, n, gamma)
+    bonds: tuple
+    angles: tuple
+    torsions: tuple
+    impropers: tuple
     charges: Any
     sigmas: Any
     epsilons: Any
     molecule_id: Any
     pf6_reacted: Any
 
+
 @dataclass(frozen=True)
 class Candidate:
     k_pf6: int
     li_idx: int
     leave_F: int
-    dmin: float
+    d_lif: float
+    d_pf: float
 
-def find_best_candidate(R, pf6_atoms_np, li_atoms_np, disp_fn, r_on, pf6_reacted_np) -> Optional[Candidate]:
+
+def _distance(disp_fn, Rj, i: int, j: int) -> float:
+    dr = np.asarray(disp_fn(Rj[int(i)], Rj[int(j)]))
+    return float(np.linalg.norm(dr))
+
+
+def find_best_candidate(
+    R,
+    pf6_atoms_np: np.ndarray,
+    li_atoms_np: np.ndarray,
+    disp_fn,
+    *,
+    r_lif_on: float,
+    r_pf_break: float,
+    pf6_reacted_np: np.ndarray,
+) -> Optional[Candidate]:
     """
-    Brute-force best Li–F candidate across PF6 blocks & Li atoms.
-    Returns Candidate or None if best_d > r_on.
-    (Kept structurally similar to your original.)
+    Find the best physically plausible PF6 + Li reaction candidate.
+
+    Required gates:
+    - Li-F must be a close contact: d_LiF < r_lif_on
+    - The leaving P-F bond must already be stretched: d_PF > r_pf_break
+
+    This prevents accepting distant Li-F pairs merely because FIRE relaxation
+    can later repair a trial product geometry.
     """
     Rj = jnp.asarray(R)
-    best = None
-    best_d = 1e30
+
+    best: Optional[Candidate] = None
+    best_score = 1.0e30
+
     for k in range(pf6_atoms_np.shape[0]):
         if pf6_reacted_np[k]:
             continue
+
+        P_atom = int(pf6_atoms_np[k, 0])
         Fs = pf6_atoms_np[k, 1:]
+
         for li in li_atoms_np:
-            dmin = 1e30
-            best_f = -1
             for f in Fs:
-                dr = np.array(disp_fn(Rj[int(li)], Rj[int(f)]))
-                d = float(np.linalg.norm(dr))
-                if d < dmin:
-                    dmin = d
-                    best_f = int(f)
-            if dmin < best_d:
-                best_d = dmin
-                best = Candidate(int(k), int(li), int(best_f), float(dmin))
-    if best is None or best_d > r_on:
-        return None
+                li_idx = int(li)
+                f_idx = int(f)
+
+                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
+                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
+
+                if d_lif >= r_lif_on:
+                    continue
+                if d_pf <= r_pf_break:
+                    continue
+
+                # Prefer closer Li-F contacts, with a small preference for
+                # more stretched P-F bonds.
+                score = d_lif - 0.1 * d_pf
+
+                if score < best_score:
+                    best_score = score
+                    best = Candidate(
+                        k_pf6=int(k),
+                        li_idx=li_idx,
+                        leave_F=f_idx,
+                        d_lif=float(d_lif),
+                        d_pf=float(d_pf),
+                    )
+
     return best
 
-def make_probe_geometry(R, *, P_atom: int, leave_F: int, disp_fn, shift_fn, r_pf_probe: float = 4.0):
+
+def find_closest_lif_pair(
+    R,
+    pf6_atoms_np: np.ndarray,
+    li_atoms_np: np.ndarray,
+    disp_fn,
+    *,
+    pf6_reacted_np: np.ndarray,
+) -> Optional[Candidate]:
     """
-    Push leaving F away from P along the old P->F direction (PBC-aware).
-    Same probe idea as your script.
+    Diagnostic helper: return the closest Li-F pair, even if it fails gates.
+    """
+    Rj = jnp.asarray(R)
+
+    best: Optional[Candidate] = None
+    best_d = 1.0e30
+
+    for k in range(pf6_atoms_np.shape[0]):
+        if pf6_reacted_np[k]:
+            continue
+
+        P_atom = int(pf6_atoms_np[k, 0])
+        Fs = pf6_atoms_np[k, 1:]
+
+        for li in li_atoms_np:
+            for f in Fs:
+                li_idx = int(li)
+                f_idx = int(f)
+
+                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
+                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
+
+                if d_lif < best_d:
+                    best_d = d_lif
+                    best = Candidate(
+                        k_pf6=int(k),
+                        li_idx=li_idx,
+                        leave_F=f_idx,
+                        d_lif=float(d_lif),
+                        d_pf=float(d_pf),
+                    )
+
+    return best
+
+
+def make_probe_geometry(
+    R,
+    *,
+    P_atom: int,
+    leave_F: int,
+    disp_fn,
+    shift_fn,
+    r_pf_probe: float = 4.0,
+):
+    """
+    Push leaving F away from P along the old P->F direction.
     """
     rP = R[P_atom]
     rF = R[leave_F]
 
-    PF_vec = disp_fn(rP, rF)                 # vector from P -> F (PBC-aware)
-    PF_dist = jnp.linalg.norm(PF_vec) + 1e-12
+    PF_vec = disp_fn(rP, rF)
+    PF_dist = jnp.linalg.norm(PF_vec) + 1.0e-12
     uPF = PF_vec / PF_dist
 
     rF_new = rP + r_pf_probe * uPF
     drF = rF_new - rF
-    R_probe = R.at[leave_F].set(shift_fn(rF, drF))
-    return R_probe
+
+    return R.at[leave_F].set(shift_fn(rF, drF))
+
 
 def propose_reaction_trial(
     sys: SystemState,
@@ -90,22 +185,27 @@ def propose_reaction_trial(
     li_type: int,
 ):
     """
-    Build trial arrays (bonded terms swapped; charges/sigma/epsilon updated; leaving F molid changed).
-    Mirrors your original block.
-    Returns (trial_arrays_dict, pf6_reacted_np_updated).
+    Build trial topology and nonbonded arrays for PF6 -> PF5 + LiF.
     """
-    k_pf6, li_idx, leave_F = cand.k_pf6, cand.li_idx, cand.leave_F
+    k_pf6 = cand.k_pf6
+    li_idx = cand.li_idx
+    leave_F = cand.leave_F
 
     P_atom = int(pf6_atoms_np[k_pf6, 0])
-    if atom_types_np[P_atom] != p_type or atom_types_np[leave_F] != f_type or atom_types_np[li_idx] != li_type:
-        return None, None  # sanity fail
 
-    # Unpack current topology to numpy
+    if (
+        atom_types_np[P_atom] != p_type
+        or atom_types_np[leave_F] != f_type
+        or atom_types_np[li_idx] != li_type
+    ):
+        return None, None
+
     bond_idx, k_b, r0 = (
         np.array(sys.bonds[0], dtype=np.int32),
         np.array(sys.bonds[1], dtype=np.float32),
         np.array(sys.bonds[2], dtype=np.float32),
     )
+
     angle_idx, k_theta, theta0 = (
         np.array(sys.angles[0], dtype=np.int32),
         np.array(sys.angles[1], dtype=np.float32),
@@ -131,22 +231,39 @@ def propose_reaction_trial(
     eps_np = np.array(sys.epsilons, dtype=np.float32)
     molecule_id_np = np.array(sys.molecule_id, dtype=np.int32)
 
-    # PF6 molecule id
     pf6_molid = int(molecule_id_np[P_atom])
 
-    # 1) Remove PF6 internal bonded terms
-    bond_idx2, (k_b2, r0_2) = remove_terms_in_molid(bond_idx, [k_b, r0], molecule_id_np, pf6_molid)
-    angle_idx2, (k_th2, th0_2) = remove_terms_in_molid(angle_idx, [k_theta, theta0], molecule_id_np, pf6_molid)
-    tors_idx2, (tors_k2, tors_n2, tors_g2) = remove_terms_in_molid(
-        tors_idx, [tors_k, tors_n, tors_gamma], molecule_id_np, pf6_molid
-    )
-    impr_idx2, (impr_k2, impr_n2, impr_g2) = remove_terms_in_molid(
-        impr_idx, [impr_k, impr_n, impr_gamma], molecule_id_np, pf6_molid
+    bond_idx2, (k_b2, r0_2) = remove_terms_in_molid(
+        bond_idx,
+        [k_b, r0],
+        molecule_id_np,
+        pf6_molid,
     )
 
-    # 2) Embed PF5 bonded terms
+    angle_idx2, (k_th2, th0_2) = remove_terms_in_molid(
+        angle_idx,
+        [k_theta, theta0],
+        molecule_id_np,
+        pf6_molid,
+    )
+
+    tors_idx2, (tors_k2, tors_n2, tors_g2) = remove_terms_in_molid(
+        tors_idx,
+        [tors_k, tors_n, tors_gamma],
+        molecule_id_np,
+        pf6_molid,
+    )
+
+    impr_idx2, (impr_k2, impr_n2, impr_g2) = remove_terms_in_molid(
+        impr_idx,
+        [impr_k, impr_n, impr_gamma],
+        molecule_id_np,
+        pf6_molid,
+    )
+
     pf5_glob, pf5_bonds_g, pf5_angles_g = embed_pf5_into_pf6(
-        pf6_atoms_np[k_pf6], leave_F,
+        pf6_atoms_np[k_pf6],
+        leave_F,
         pf5_bond_idx_local=pf5.bond_idx_local,
         pf5_angle_idx_local=pf5.angle_idx_local,
     )
@@ -159,7 +276,6 @@ def propose_reaction_trial(
     k_th2 = np.concatenate([k_th2, pf5.k_theta], axis=0)
     th0_2 = np.concatenate([th0_2, pf5.theta0], axis=0)
 
-    # 3) Update PF5 nonbonded
     P_pf5 = int(pf5_glob[0])
     Fs_pf5 = pf5_glob[1:]
 
@@ -169,36 +285,36 @@ def propose_reaction_trial(
     eps_np[P_pf5], sigmas_np[P_pf5] = pf5.pair["P"]
     eps_np[Fs_pf5], sigmas_np[Fs_pf5] = pf5.pair["F"]
 
-    # 4) LiF nonbonded for leaving F and Li
     charges_np[leave_F] = lif.nb["F"]["q"]
-    sigmas_np[leave_F]  = lif.nb["F"]["sigma"]
-    eps_np[leave_F]     = lif.nb["F"]["eps"]
+    sigmas_np[leave_F] = lif.nb["F"]["sigma"]
+    eps_np[leave_F] = lif.nb["F"]["eps"]
 
     charges_np[li_idx] = lif.nb["Li"]["q"]
-    sigmas_np[li_idx]  = lif.nb["Li"]["sigma"]
-    eps_np[li_idx]     = lif.nb["Li"]["eps"]
+    sigmas_np[li_idx] = lif.nb["Li"]["sigma"]
+    eps_np[li_idx] = lif.nb["Li"]["eps"]
 
-    # 5) Leave F as separate molecule
     molecule_id2 = molecule_id_np.copy()
     new_molid = int(molecule_id2.max()) + 1
     molecule_id2[leave_F] = new_molid
 
-    return dict(
-        bonds=(bond_idx2, k_b2, r0_2),
-        angles=(angle_idx2, k_th2, th0_2),
-        torsions=(tors_idx2, tors_k2, tors_n2, tors_g2),
-        impropers=(impr_idx2, impr_k2, impr_n2, impr_g2),
-        charges=charges_np,
-        sigmas=sigmas_np,
-        epsilons=eps_np,
-        molecule_id=molecule_id2,
-    ), pf6_molid
+    return {
+        "bonds": (bond_idx2, k_b2, r0_2),
+        "angles": (angle_idx2, k_th2, th0_2),
+        "torsions": (tors_idx2, tors_k2, tors_n2, tors_g2),
+        "impropers": (impr_idx2, impr_k2, impr_n2, impr_g2),
+        "charges": charges_np,
+        "sigmas": sigmas_np,
+        "epsilons": eps_np,
+        "molecule_id": molecule_id2,
+    }, pf6_molid
+
 
 def accept_reject(key, dE: float, beta: float):
     p_acc = min(1.0, float(np.exp(-beta * dE)))
     key, sub = jax.random.split(key)
     u = float(jax.random.uniform(sub))
     return key, (u < p_acc), p_acc
+
 
 def maybe_react_one_event(
     key,
@@ -216,52 +332,86 @@ def maybe_react_one_event(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_on: float,
+    r_lif_on: float,
+    r_pf_break: float,
+    r_pf_probe: float,
     beta: float,
+    mc_energy_evaluator=None,
 ):
     """
-    Performs one reaction attempt (0 or 1 event), returns updated (key, accepted, ff, sys, info).
-    Kept aligned with your current behavior.
+    Attempt one PF6 -> PF5 + LiF reaction.
+
+    A trial topology is only built after the geometry gate passes. This avoids
+    repeatedly compiling FIRE relaxation for clearly unphysical distant pairs.
     """
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    cand = find_best_candidate(R, pf6_atoms_np, li_atoms_np, ff.disp_fn, r_on, pf6_reacted_np)
-    if cand is None:
-        # debug: closest Li–F overall (even if > r_on)
-        best_any = find_best_candidate(R, pf6_atoms_np, li_atoms_np, ff.disp_fn, 1e9, pf6_reacted_np)
-        if best_any is not None:
-            print(
-                f"  [debug] No candidate under r_on={r_on:.3f}. "
-                f"Closest Li–F: Li={best_any.li_idx}, F={best_any.leave_F}, d={best_any.dmin:.3f} Å"
-            )
-        else:
-            print("  [debug] No Li–F pairs found at all (unexpected).")
-        return key, False, ff, sys, {}, R
+    cand = find_best_candidate(
+        R,
+        pf6_atoms_np,
+        li_atoms_np,
+        ff.disp_fn,
+        r_lif_on=r_lif_on,
+        r_pf_break=r_pf_break,
+        pf6_reacted_np=pf6_reacted_np,
+    )
 
-    nlist_before = ff.neighbor_fn.update(R, ff.nlist)
-    E_before = float(ff.energy_fn(R, nlist_before)["total"])
+    if cand is None:
+        closest = find_closest_lif_pair(
+            R,
+            pf6_atoms_np,
+            li_atoms_np,
+            ff.disp_fn,
+            pf6_reacted_np=pf6_reacted_np,
+        )
+
+        info = {}
+        if closest is not None:
+            info["closest"] = {
+                "k_pf6": closest.k_pf6,
+                "li_idx": closest.li_idx,
+                "leave_F": closest.leave_F,
+                "d_lif": closest.d_lif,
+                "d_pf": closest.d_pf,
+            }
+
+        return key, False, ff, sys, info, R
+
+    if mc_energy_evaluator is None:
+       nlist_before = ff.neighbor_fn.update(R, ff.nlist)
+       E_before_arr = ff.energy_fn(R, nlist_before)["total"]
+       E_before_arr.block_until_ready()
+       E_before = float(E_before_arr)
+    else:
+       E_before = mc_energy_evaluator.energy(R)
 
     trial, _pf6_molid = propose_reaction_trial(
-        sys, cand,
+        sys,
+        cand,
         pf6_atoms_np=pf6_atoms_np,
         atom_types_np=atom_types_np,
         pf5=pf5,
         lif=lif,
-        p_type=p_type, f_type=f_type, li_type=li_type,
+        p_type=p_type,
+        f_type=f_type,
+        li_type=li_type,
     )
-    if trial is None:
-        print("  [debug] Type sanity failed for candidate; skipping.")
-        return key, False, ff, sys, {}
 
-    # Rebuild trial force field
+    if trial is None:
+        return key, False, ff, sys, {"reason": "type_sanity_failed"}, R
+
     ff_trial = build_forcefield(
         R=R,
         box=box,
-        bond_idx=trial["bonds"][0], k_b=trial["bonds"][1], r0=trial["bonds"][2],
-        angle_idx=trial["angles"][0], k_theta=trial["angles"][1], theta0=trial["angles"][2],
+        bond_idx=trial["bonds"][0],
+        k_b=trial["bonds"][1],
+        r0=trial["bonds"][2],
+        angle_idx=trial["angles"][0],
+        k_theta=trial["angles"][1],
+        theta0=trial["angles"][2],
         torsions=trial["torsions"],
         impropers=trial["impropers"],
         charges=trial["charges"],
@@ -272,36 +422,77 @@ def maybe_react_one_event(
         dr_threshold=float(ff.nb_options.dr_threshold),
     )
 
-    # --- NEW: FIRE relaxation under trial topology ---
-    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
-      R,                # relax starting from this configuration
-      ff_trial=ff_trial,
-      shift_fn=shift_fn,
-      n_steps=30,
-      dt_start=1e-3,
-      f_inc=1.01,
-      dt_max=1e-2,
-      n_min=2,
+    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
+    R_probe = make_probe_geometry(
+        R,
+        P_atom=P_atom,
+        leave_F=cand.leave_F,
+        disp_fn=ff.disp_fn,
+        shift_fn=shift_fn,
+        r_pf_probe=r_pf_probe,
     )
 
-    E_after = float(ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"])
-    dE = E_after - E_before
+    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+        R_probe,
+        ff_trial=ff_trial,
+        shift_fn=shift_fn,
+        n_steps=30,
+        dt_start=1.0e-3,
+        f_inc=1.01,
+        dt_max=1.0e-2,
+        n_min=2,
+    )
 
+    if mc_energy_evaluator is None:
+       E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
+       E_after_arr.block_until_ready()
+       E_after = float(E_after_arr)
+    else:
+       E_after = mc_energy_evaluator.energy(R_relaxed)
+
+    dE = E_after - E_before
     key, accepted, p_acc = accept_reject(key, dE, beta)
+
+    candidate_info = {
+        "k_pf6": cand.k_pf6,
+        "li_idx": cand.li_idx,
+        "leave_F": cand.leave_F,
+        "d_lif": cand.d_lif,
+        "d_pf": cand.d_pf,
+    }
+
     if not accepted:
         return key, False, ff, sys, {
-            "candidate": (cand.k_pf6, cand.li_idx, cand.leave_F, cand.dmin),
+            "candidate": candidate_info,
             "dE": dE,
             "p_acc": p_acc,
-        },R
+        }, R
 
-    # accepted: update sys and pf6_reacted flag
     pf6_reacted_np[cand.k_pf6] = True
+
     sys_new = SystemState(
-        bonds=(jnp.array(trial["bonds"][0], dtype=int), jnp.array(trial["bonds"][1]), jnp.array(trial["bonds"][2])),
-        angles=(jnp.array(trial["angles"][0], dtype=int), jnp.array(trial["angles"][1]), jnp.array(trial["angles"][2])),
-        torsions=(jnp.array(trial["torsions"][0], dtype=int), jnp.array(trial["torsions"][1]), jnp.array(trial["torsions"][2]), jnp.array(trial["torsions"][3])),
-        impropers=(jnp.array(trial["impropers"][0], dtype=int), jnp.array(trial["impropers"][1]), jnp.array(trial["impropers"][2]), jnp.array(trial["impropers"][3])),
+        bonds=(
+            jnp.array(trial["bonds"][0], dtype=int),
+            jnp.array(trial["bonds"][1]),
+            jnp.array(trial["bonds"][2]),
+        ),
+        angles=(
+            jnp.array(trial["angles"][0], dtype=int),
+            jnp.array(trial["angles"][1]),
+            jnp.array(trial["angles"][2]),
+        ),
+        torsions=(
+            jnp.array(trial["torsions"][0], dtype=int),
+            jnp.array(trial["torsions"][1]),
+            jnp.array(trial["torsions"][2]),
+            jnp.array(trial["torsions"][3]),
+        ),
+        impropers=(
+            jnp.array(trial["impropers"][0], dtype=int),
+            jnp.array(trial["impropers"][1]),
+            jnp.array(trial["impropers"][2]),
+            jnp.array(trial["impropers"][3]),
+        ),
         charges=jnp.array(trial["charges"]),
         sigmas=jnp.array(trial["sigmas"]),
         epsilons=jnp.array(trial["epsilons"]),
@@ -310,10 +501,11 @@ def maybe_react_one_event(
     )
 
     return key, True, ff_trial, sys_new, {
-        "accepted_event": (cand.k_pf6, cand.li_idx, cand.leave_F, cand.dmin),
+        "accepted_event": candidate_info,
         "dE": dE,
         "p_acc": p_acc,
-        },R_relaxed
+    }, R_relaxed
+
 
 def fire_relax_with_nlist(
     R0: jnp.ndarray,
@@ -321,16 +513,14 @@ def fire_relax_with_nlist(
     ff_trial,
     shift_fn,
     n_steps: int = 30,
-    dt_start: float = 1e-3,
+    dt_start: float = 1.0e-3,
     f_inc: float = 1.01,
-    dt_max: float = 1e-2,
+    dt_max: float = 1.0e-2,
     n_min: int = 2,
 ):
     """
-    Run FIRE minimization under ff_trial, updating the neighbor list each iteration.
-    Returns (R_relaxed, nlist_relaxed).
+    Run FIRE minimization under trial topology, updating the neighbor list.
     """
-    # FIRE expects energy_fn(position, **kwargs) -> scalar
     def energy_scalar(R, *, nlist):
         return ff_trial.energy_fn(R, nlist)["total"]
 
@@ -342,6 +532,7 @@ def fire_relax_with_nlist(
         dt_max=dt_max,
         n_min=n_min,
     )
+
     fire_apply = jax.jit(fire_apply)
     update_nlist = jax.jit(ff_trial.neighbor_fn.update)
 
@@ -351,11 +542,16 @@ def fire_relax_with_nlist(
     @jax.jit
     def step_fire_fn(i, carry):
         st, nl = carry
-        # update FIRST to match current position
         nl = update_nlist(st.position, nl)
         st = fire_apply(st, nlist=nl)
         return st, nl
 
-    fire_state, nlist = jax.lax.fori_loop(0, n_steps, step_fire_fn, (fire_state, nlist))
-    return fire_state.position, nlist
+    fire_state, nlist = jax.lax.fori_loop(
+        0,
+        int(n_steps),
+        step_fire_fn,
+        (fire_state, nlist),
+    )
 
+    fire_state.position.block_until_ready()
+    return fire_state.position, nlist

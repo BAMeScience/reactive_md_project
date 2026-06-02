@@ -1,6 +1,7 @@
 # reactive_md/config.py
 from dataclasses import dataclass
 
+
 @dataclass(frozen=True)
 class SimConfig:
     data_file: str = "mixture_classical_after_300K_NPT.data"
@@ -8,12 +9,15 @@ class SimConfig:
 
     dt: float = 1.0e-3
     steps: int = 2000
-    check_every: int = 50
+    check_every: int = 100
     max_events: int = 9999
 
-    r_on: float = 4.0
+    r_lif_on: float = 2.4
+    r_pf_break: float = 1.61
+    r_pf_probe: float = 4.0
+
     temperature_k: float = 400.0
-    kb_real: float = 0.0019872041  # kcal/mol/K in LAMMPS "real" units
+    kb_real: float = 0.0019872041
 
     r_cut: float = 15.0
     dr_threshold: float = 0.5
@@ -22,6 +26,15 @@ class SimConfig:
     f_type: int = 7
     li_type: int = 8
 
-    tau_T: float = 100.0  # Nose-Hoover tau
+    tau_T: float = 100.0
     prng_seed: int = 0
 
+    dump_file: str | None = None
+    dump_every: int | None = None
+    event_log_file: str | None = None
+
+    use_mace_mc: bool = False
+    mace_source: str = "mp"
+    mace_variant: str = "medium"
+    mace_dr_threshold: float = 0.5
+    mace_capacity_multiplier: float = 1.25
