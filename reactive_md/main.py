@@ -217,6 +217,30 @@ def main(cfg: SimConfig):
        beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
     def reaction_step_fn(key, R, ff_in, sys_in):
+        if cfg.reaction_mode == "rate":
+            return maybe_react_rate_events(
+                key,
+                R,
+                box,
+                shift_fn=shift_fn,
+                ff=ff_in,
+                sys=sys_in,
+                pf6_atoms=pf6_atoms,
+                li_atoms=li_atoms,
+                atom_types=atom_types,
+                pf5=pf5,
+                lif=lif,
+                p_type=cfg.p_type,
+                f_type=cfg.f_type,
+                li_type=cfg.li_type,
+                r_lif_on=cfg.r_lif_on,
+                r_pf_break=cfg.r_pf_break,
+                r_pf_probe=cfg.r_pf_probe,
+                reaction_rate_ps=cfg.reaction_rate_ps,
+                reactive_interval_ps=cfg.check_every * cfg.dt,
+                max_reactions_per_check=cfg.max_reactions_per_check,
+            )
+
         return maybe_react_one_event(
             key,
             R,
@@ -238,6 +262,7 @@ def main(cfg: SimConfig):
             beta=beta,
             mc_energy_evaluator=mc_energy_evaluator,
         )
+
 
     key = jax.random.PRNGKey(cfg.prng_seed)
 
@@ -280,6 +305,15 @@ def cli():
 
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--check-every", type=int, default=None)
+
+    parser.add_argument("--reaction-mode",choices=["metropolis", "rate"],
+     default=default_cfg.reaction_mode,
+    )
+    parser.add_argument(
+      "--reaction-rate-ps", type=float, default=default_cfg.reaction_rate_ps,
+      help="Rate-based reaction probability parameter k in ps^-1.",
+    )
+    parser.add_argument("--max-reactions-per-check", type=int, default=default_cfg.max_reactions_per_check,)
 
     parser.add_argument("--r-lif-on", type=float, default=None)
     parser.add_argument("--r-pf-break", type=float, default=None)

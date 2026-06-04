@@ -7,16 +7,20 @@ class SimConfig:
     data_file: str = "mixture_classical_after_300K_NPT.data"
     settings_file: str = "mixture.in.settings"
 
-    dt: float = 1.0e-3
+    dt: float = 0.5e-3
     steps: int = 2000
     check_every: int = 100
     max_events: int = 9999
+
+    reaction_mode: str = "metropolis"  # "metropolis" or "rate"
+    reaction_rate_ps: float = 0.0      # molecular rate in ps^-1
+    max_reactions_per_check: int = 1
 
     r_lif_on: float = 2.4
     r_pf_break: float = 1.61
     r_pf_probe: float = 4.0
 
-    temperature_k: float = 400.0
+    temperature_k: float = 1000.0
     kb_real: float = 0.0019872041
 
     r_cut: float = 15.0
