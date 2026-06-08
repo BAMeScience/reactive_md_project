@@ -16,7 +16,11 @@ from .config import SimConfig
 from .templates_pf5 import make_pf5_template, make_lif_template
 from .topology_opls import discover_pf6_and_li
 from .forcefield import build_forcefield
-from .reaction import SystemState, maybe_react_one_event
+from .reaction import (
+    SystemState,
+    maybe_react_one_event,
+    maybe_react_rate_events,
+)
 from .md_driver import run_md_nvt_with_reactions
 from .lammps_io import write_lammps_dump_frame
 
@@ -73,6 +77,15 @@ def main(cfg: SimConfig):
         f"d_PF > {cfg.r_pf_break:.3f} Å"
     )
 
+    print(f"Reaction mode: {cfg.reaction_mode}")
+    if cfg.reaction_mode == "rate":
+        print(
+            f"Rate parameters: "
+            f"k={cfg.reaction_rate_ps} ps^-1, "
+            f"dt_reactive={cfg.check_every * cfg.dt:.4f} ps, "
+            f"max_reactions_per_check={cfg.max_reactions_per_check}"
+        )
+
     if cfg.dump_file is not None:
         dump_every = cfg.dump_every if cfg.dump_every is not None else cfg.check_every
         print(f"Writing LAMMPS dump trajectory to: {cfg.dump_file}")
@@ -84,6 +97,12 @@ def main(cfg: SimConfig):
         print(f"Writing reaction event log to: {cfg.event_log_file}")
         if cfg.event_log_file.endswith(".gz"):
             print("Event log compression: gzip")
+
+    if cfg.candidate_log_file is not None:
+        print(f"Writing candidate / near-miss log to: {cfg.candidate_log_file}")
+        print(f"Candidate log top N per check: {cfg.candidate_log_top_n}")
+        if cfg.candidate_log_file.endswith(".gz"):
+            print("Candidate log compression: gzip")
 
     if pf6_atoms.shape[0] > 0:
         print("First PF6 block indices:", pf6_atoms[0])
@@ -156,65 +175,64 @@ def main(cfg: SimConfig):
     pf5 = make_pf5_template()
     lif = make_lif_template()
 
-
     mc_energy_evaluator = None
 
     if cfg.use_mace_mc:
-       from .mace_setup import build_mace_model
-       from .mace_energy import build_mace_energy_system
-       from .mace_mc_energy import MaceJaxEnergyEvaluator
+        from .mace_setup import build_mace_model
+        from .mace_energy import build_mace_energy_system
+        from .mace_mc_energy import MaceJaxEnergyEvaluator
 
-       type_to_Z = {
-        1: 6,   # C
-        2: 8,   # O
-        3: 8,   # O
-        4: 6,   # C
-        5: 1,   # H
-        6: 15,  # P
-        7: 9,   # F
-        8: 3,   # Li
-       }
+        type_to_Z = {
+            1: 6,   # C
+            2: 8,   # O
+            3: 8,   # O
+            4: 6,   # C
+            5: 1,   # H
+            6: 15,  # P
+            7: 9,   # F
+            8: 3,   # Li
+        }
 
-       z_atomic = np.array([type_to_Z[int(t)] for t in atom_types], dtype=np.int32)
+        z_atomic = np.array([type_to_Z[int(t)] for t in atom_types], dtype=np.int32)
 
-       jax_model, jax_model_config, _torch_config = build_mace_model(
-          source=cfg.mace_source,
-          variant=cfg.mace_variant,
-       )
+        print("Unique atom types:", np.unique(atom_types))
+        print("Unique atomic numbers:", np.unique(z_atomic))
+        print(
+            f"Loading MACE model: source={cfg.mace_source}, "
+            f"variant={cfg.mace_variant}"
+        )
 
-       (
-         _mace_disp_fn,
-         _mace_shift_fn,
-         mace_neighbor_fn,
-         mace_make_energy_fn,
-       ) = build_mace_energy_system(
-         jax_model=jax_model,
-         jax_model_config=jax_model_config,
-         z_atomic=z_atomic,
-         box0=box,
-         ensemble="nve",
-         dr_threshold=cfg.mace_dr_threshold,
-         capacity_multiplier=cfg.mace_capacity_multiplier,
-       )
+        jax_model, jax_model_config, _torch_config = build_mace_model(
+            source=cfg.mace_source,
+            variant=cfg.mace_variant,
+        )
 
-       mc_energy_evaluator = MaceJaxEnergyEvaluator(
-         neighbor_fn=mace_neighbor_fn,
-         make_energy_fn=mace_make_energy_fn,
-         box0=box,
-       )
+        (
+            _mace_disp_fn,
+            _mace_shift_fn,
+            mace_neighbor_fn,
+            mace_make_energy_fn,
+        ) = build_mace_energy_system(
+            jax_model=jax_model,
+            jax_model_config=jax_model_config,
+            z_atomic=z_atomic,
+            box0=box,
+            ensemble="nve",
+            dr_threshold=cfg.mace_dr_threshold,
+            capacity_multiplier=cfg.mace_capacity_multiplier,
+        )
 
-       print("Metropolis energy: MACE-JAX")
+        mc_energy_evaluator = MaceJaxEnergyEvaluator(
+            neighbor_fn=mace_neighbor_fn,
+            make_energy_fn=mace_make_energy_fn,
+            box0=box,
+        )
+
+        print("Metropolis energy: MACE-JAX")
+        beta = 1.0 / (8.617333262e-5 * cfg.temperature_k)
     else:
-       print("Metropolis energy: classical force field")
-
-    # ------------------------------------
-      # Beta depends on energy units
-    # ------------------------------------
-
-    if cfg.use_mace_mc:
-       beta = 1.0 / (8.617333262e-5 * cfg.temperature_k)
-    else:
-       beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
+        print("Metropolis energy: classical force field")
+        beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
     def reaction_step_fn(key, R, ff_in, sys_in):
         if cfg.reaction_mode == "rate":
@@ -236,9 +254,13 @@ def main(cfg: SimConfig):
                 r_lif_on=cfg.r_lif_on,
                 r_pf_break=cfg.r_pf_break,
                 r_pf_probe=cfg.r_pf_probe,
+                rate_pf_mode=cfg.rate_pf_mode,
+                rate_pf_mid=cfg.rate_pf_mid,
+                rate_pf_width=cfg.rate_pf_width,
                 reaction_rate_ps=cfg.reaction_rate_ps,
                 reactive_interval_ps=cfg.check_every * cfg.dt,
                 max_reactions_per_check=cfg.max_reactions_per_check,
+                candidate_log_top_n=cfg.candidate_log_top_n,
             )
 
         return maybe_react_one_event(
@@ -261,20 +283,24 @@ def main(cfg: SimConfig):
             r_pf_probe=cfg.r_pf_probe,
             beta=beta,
             mc_energy_evaluator=mc_energy_evaluator,
+            candidate_log_top_n=cfg.candidate_log_top_n,
         )
-
 
     key = jax.random.PRNGKey(cfg.prng_seed)
 
     with ExitStack() as stack:
         dump_file = None
         event_file = None
+        candidate_file = None
 
         if cfg.dump_file is not None:
             dump_file = stack.enter_context(_open_text_output(cfg.dump_file))
 
         if cfg.event_log_file is not None:
             event_file = stack.enter_context(_open_text_output(cfg.event_log_file))
+
+        if cfg.candidate_log_file is not None:
+            candidate_file = stack.enter_context(_open_text_output(cfg.candidate_log_file))
 
         _result = run_md_nvt_with_reactions(
             key,
@@ -291,11 +317,11 @@ def main(cfg: SimConfig):
             dump_file=dump_file,
             dump_writer=write_lammps_dump_frame if dump_file is not None else None,
             event_file=event_file,
+            candidate_file=candidate_file,
         )
 
 
 def cli():
-  
     default_cfg = SimConfig()
 
     parser = argparse.ArgumentParser(description="Reactive OPLS-AA MD using JAX-MD")
@@ -306,18 +332,29 @@ def cli():
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--check-every", type=int, default=None)
 
-    parser.add_argument("--reaction-mode",choices=["metropolis", "rate"],
-     default=default_cfg.reaction_mode,
-    )
-    parser.add_argument(
-      "--reaction-rate-ps", type=float, default=default_cfg.reaction_rate_ps,
-      help="Rate-based reaction probability parameter k in ps^-1.",
-    )
-    parser.add_argument("--max-reactions-per-check", type=int, default=default_cfg.max_reactions_per_check,)
-
     parser.add_argument("--r-lif-on", type=float, default=None)
     parser.add_argument("--r-pf-break", type=float, default=None)
     parser.add_argument("--r-pf-probe", type=float, default=None)
+
+    parser.add_argument("--rate-pf-mode", choices=["hard", "sigmoid"], default=default_cfg.rate_pf_mode)
+    parser.add_argument("--rate-pf-mid", type=float, default=default_cfg.rate_pf_mid)
+    parser.add_argument("--rate-pf-width", type=float, default=default_cfg.rate_pf_width)
+
+    parser.add_argument(
+        "--reaction-mode",
+        choices=["metropolis", "rate"],
+        default=default_cfg.reaction_mode,
+    )
+    parser.add_argument(
+        "--reaction-rate-ps",
+        type=float,
+        default=default_cfg.reaction_rate_ps,
+    )
+    parser.add_argument(
+        "--max-reactions-per-check",
+        type=int,
+        default=default_cfg.max_reactions_per_check,
+    )
 
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
@@ -340,18 +377,33 @@ def cli():
     )
 
     parser.add_argument(
-    "--use-mace-mc",
-    action="store_true",
-    help="Use MACE-JAX energies for Metropolis acceptance only.",
-    ) 
+        "--candidate-log-file",
+        default=None,
+        help="CSV candidate / near-miss log. Use .gz for gzip.",
+    )
+    parser.add_argument(
+        "--candidate-log-top-n",
+        type=int,
+        default=default_cfg.candidate_log_top_n,
+        help="Number of closest candidate/near-miss records to log per check.",
+    )
 
+    parser.add_argument(
+        "--use-mace-mc",
+        action="store_true",
+        help="Use MACE-JAX energies for Metropolis acceptance only.",
+    )
     parser.add_argument("--mace-source", default=default_cfg.mace_source)
     parser.add_argument("--mace-variant", default=default_cfg.mace_variant)
-    parser.add_argument("--mace-dr-threshold", type=float, default=default_cfg.mace_dr_threshold)
     parser.add_argument(
-      "--mace-capacity-multiplier",
-      type=float,
-      default=default_cfg.mace_capacity_multiplier,
+        "--mace-dr-threshold",
+        type=float,
+        default=default_cfg.mace_dr_threshold,
+    )
+    parser.add_argument(
+        "--mace-capacity-multiplier",
+        type=float,
+        default=default_cfg.mace_capacity_multiplier,
     )
 
     args = parser.parse_args()
@@ -364,6 +416,12 @@ def cli():
         r_lif_on=args.r_lif_on if args.r_lif_on is not None else default_cfg.r_lif_on,
         r_pf_break=args.r_pf_break if args.r_pf_break is not None else default_cfg.r_pf_break,
         r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
+        rate_pf_mode=args.rate_pf_mode,
+        rate_pf_mid=args.rate_pf_mid,
+        rate_pf_width=args.rate_pf_width,
+        reaction_mode=args.reaction_mode,
+        reaction_rate_ps=args.reaction_rate_ps,
+        max_reactions_per_check=args.max_reactions_per_check,
         temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,
         dump_file=(
@@ -377,13 +435,17 @@ def cli():
             if args.event_log_file is not None
             else None
         ),
-
+        candidate_log_file=(
+            str(Path(args.candidate_log_file).expanduser().resolve())
+            if args.candidate_log_file is not None
+            else None
+        ),
+        candidate_log_top_n=args.candidate_log_top_n,
         use_mace_mc=args.use_mace_mc,
         mace_source=args.mace_source,
         mace_variant=args.mace_variant,
         mace_dr_threshold=args.mace_dr_threshold,
-        mace_capacity_multiplier=args.mace_capacity_multiplier
-
+        mace_capacity_multiplier=args.mace_capacity_multiplier,
     )
 
     main(cfg)

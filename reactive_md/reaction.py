@@ -41,7 +41,27 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
     return float(np.linalg.norm(dr))
 
 
-def find_best_candidate(
+def pf_rate_factor(
+    d_pf: float,
+    *,
+    mode: str,
+    r_pf_break: float,
+    pf_mid: float,
+    pf_width: float,
+) -> float:
+    if mode == "hard":
+        return 1.0 if d_pf > r_pf_break else 0.0
+
+    if mode == "sigmoid":
+        if pf_width <= 0.0:
+            raise ValueError("rate_pf_width must be positive for sigmoid mode.")
+        x = (d_pf - pf_mid) / pf_width
+        return float(1.0 / (1.0 + np.exp(-x)))
+
+    raise ValueError(f"Unknown rate_pf_mode: {mode!r}")
+
+
+def find_near_miss_candidates(
     R,
     pf6_atoms_np: np.ndarray,
     li_atoms_np: np.ndarray,
@@ -50,21 +70,10 @@ def find_best_candidate(
     r_lif_on: float,
     r_pf_break: float,
     pf6_reacted_np: np.ndarray,
-) -> Optional[Candidate]:
-    """
-    Find the best physically plausible PF6 + Li reaction candidate.
-
-    Required gates:
-    - Li-F must be a close contact: d_LiF < r_lif_on
-    - The leaving P-F bond must already be stretched: d_PF > r_pf_break
-
-    This prevents accepting distant Li-F pairs merely because FIRE relaxation
-    can later repair a trial product geometry.
-    """
+    top_n: int = 10,
+):
     Rj = jnp.asarray(R)
-
-    best: Optional[Candidate] = None
-    best_score = 1.0e30
+    records = []
 
     for k in range(pf6_atoms_np.shape[0]):
         if pf6_reacted_np[k]:
@@ -81,37 +90,102 @@ def find_best_candidate(
                 d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
                 d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
 
+                passes_lif = d_lif < r_lif_on
+                passes_pf = d_pf > r_pf_break
+
+                records.append(
+                    {
+                        "k_pf6": int(k),
+                        "li_idx": li_idx,
+                        "leave_F": f_idx,
+                        "d_lif": float(d_lif),
+                        "d_pf": float(d_pf),
+                        "q_pf_minus_lif": float(d_pf - d_lif),
+                        "passes_lif": int(passes_lif),
+                        "passes_pf": int(passes_pf),
+                        "passes_all": int(passes_lif and passes_pf),
+                    }
+                )
+
+    records.sort(
+        key=lambda x: (
+            1 - x["passes_all"],
+            x["d_lif"],
+            -x["d_pf"],
+        )
+    )
+
+    records = records[: int(top_n)]
+
+    for i, rec in enumerate(records):
+        rec["rank"] = int(i)
+
+    return records
+
+
+def find_lif_contact_candidates(
+    R,
+    pf6_atoms_np: np.ndarray,
+    li_atoms_np: np.ndarray,
+    disp_fn,
+    *,
+    r_lif_on: float,
+    pf6_reacted_np: np.ndarray,
+):
+    """
+    Rate-mode candidate pool.
+
+    This intentionally uses only the Li-F contact gate. The P-F geometry enters
+    later through a smooth rate factor, not as a hard candidate filter.
+    """
+    Rj = jnp.asarray(R)
+    candidates = []
+
+    for k in range(pf6_atoms_np.shape[0]):
+        if pf6_reacted_np[k]:
+            continue
+
+        P_atom = int(pf6_atoms_np[k, 0])
+        Fs = pf6_atoms_np[k, 1:]
+
+        for li in li_atoms_np:
+            for f in Fs:
+                li_idx = int(li)
+                f_idx = int(f)
+
+                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
                 if d_lif >= r_lif_on:
                     continue
-                if d_pf <= r_pf_break:
-                    continue
 
-                # Prefer closer Li-F contacts, with a small preference for
-                # more stretched P-F bonds.
-                score = d_lif - 0.1 * d_pf
+                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
 
-                if score < best_score:
-                    best_score = score
-                    best = Candidate(
+                candidates.append(
+                    Candidate(
                         k_pf6=int(k),
                         li_idx=li_idx,
                         leave_F=f_idx,
                         d_lif=float(d_lif),
                         d_pf=float(d_pf),
                     )
+                )
 
-    return best
+    candidates.sort(key=lambda c: (c.d_lif, -c.d_pf))
+    return candidates
+
 
 def find_all_candidates(
     R,
-    pf6_atoms_np,
-    li_atoms_np,
+    pf6_atoms_np: np.ndarray,
+    li_atoms_np: np.ndarray,
     disp_fn,
     *,
-    r_lif_on,
-    r_pf_break,
-    pf6_reacted_np,
+    r_lif_on: float,
+    r_pf_break: float,
+    pf6_reacted_np: np.ndarray,
 ):
+    """
+    Hard-gated candidate finder used by Metropolis mode.
+    """
     Rj = jnp.asarray(R)
     candidates = []
 
@@ -144,6 +218,31 @@ def find_all_candidates(
     candidates.sort(key=lambda c: (c.d_lif, -c.d_pf))
     return candidates
 
+
+def find_best_candidate(
+    R,
+    pf6_atoms_np: np.ndarray,
+    li_atoms_np: np.ndarray,
+    disp_fn,
+    *,
+    r_lif_on: float,
+    r_pf_break: float,
+    pf6_reacted_np: np.ndarray,
+) -> Optional[Candidate]:
+    candidates = find_all_candidates(
+        R,
+        pf6_atoms_np,
+        li_atoms_np,
+        disp_fn,
+        r_lif_on=r_lif_on,
+        r_pf_break=r_pf_break,
+        pf6_reacted_np=pf6_reacted_np,
+    )
+    if not candidates:
+        return None
+    return candidates[0]
+
+
 def find_closest_lif_pair(
     R,
     pf6_atoms_np: np.ndarray,
@@ -152,9 +251,6 @@ def find_closest_lif_pair(
     *,
     pf6_reacted_np: np.ndarray,
 ) -> Optional[Candidate]:
-    """
-    Diagnostic helper: return the closest Li-F pair, even if it fails gates.
-    """
     Rj = jnp.asarray(R)
 
     best: Optional[Candidate] = None
@@ -197,9 +293,6 @@ def make_probe_geometry(
     shift_fn,
     r_pf_probe: float = 4.0,
 ):
-    """
-    Push leaving F away from P along the old P->F direction.
-    """
     rP = R[P_atom]
     rF = R[leave_F]
 
@@ -225,9 +318,6 @@ def propose_reaction_trial(
     f_type: int,
     li_type: int,
 ):
-    """
-    Build trial topology and nonbonded arrays for PF6 -> PF5 + LiF.
-    """
     k_pf6 = cand.k_pf6
     li_idx = cand.li_idx
     leave_F = cand.leave_F
@@ -350,168 +440,11 @@ def propose_reaction_trial(
     }, pf6_molid
 
 
-def accept_reject(key, dE: float, beta: float):
-    p_acc = min(1.0, float(np.exp(-beta * dE)))
-    key, sub = jax.random.split(key)
-    u = float(jax.random.uniform(sub))
-    return key, (u < p_acc), p_acc
-
-
-def maybe_react_one_event(
-    key,
-    R,
-    box,
-    *,
-    shift_fn,
-    ff: FFBundle,
-    sys: SystemState,
-    pf6_atoms,
-    li_atoms,
-    atom_types,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
-    r_lif_on: float,
-    r_pf_break: float,
-    r_pf_probe: float,
-    beta: float,
-    mc_energy_evaluator=None,
-):
-    """
-    Attempt one PF6 -> PF5 + LiF reaction.
-
-    A trial topology is only built after the geometry gate passes. This avoids
-    repeatedly compiling FIRE relaxation for clearly unphysical distant pairs.
-    """
-    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
-    li_atoms_np = np.array(li_atoms, dtype=np.int32)
-    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    atom_types_np = np.array(atom_types)
-
-    cand = find_best_candidate(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        ff.disp_fn,
-        r_lif_on=r_lif_on,
-        r_pf_break=r_pf_break,
-        pf6_reacted_np=pf6_reacted_np,
-    )
-
-    if cand is None:
-        closest = find_closest_lif_pair(
-            R,
-            pf6_atoms_np,
-            li_atoms_np,
-            ff.disp_fn,
-            pf6_reacted_np=pf6_reacted_np,
-        )
-
-        info = {}
-        if closest is not None:
-            info["closest"] = {
-                "k_pf6": closest.k_pf6,
-                "li_idx": closest.li_idx,
-                "leave_F": closest.leave_F,
-                "d_lif": closest.d_lif,
-                "d_pf": closest.d_pf,
-            }
-
-        return key, False, ff, sys, info, R
-
-    if mc_energy_evaluator is None:
-       nlist_before = ff.neighbor_fn.update(R, ff.nlist)
-       E_before_arr = ff.energy_fn(R, nlist_before)["total"]
-       E_before_arr.block_until_ready()
-       E_before = float(E_before_arr)
-    else:
-       E_before = mc_energy_evaluator.energy(R)
-
-    trial, _pf6_molid = propose_reaction_trial(
-        sys,
-        cand,
-        pf6_atoms_np=pf6_atoms_np,
-        atom_types_np=atom_types_np,
-        pf5=pf5,
-        lif=lif,
-        p_type=p_type,
-        f_type=f_type,
-        li_type=li_type,
-    )
-
-    if trial is None:
-        return key, False, ff, sys, {"reason": "type_sanity_failed"}, R
-
-    ff_trial = build_forcefield(
-        R=R,
-        box=box,
-        bond_idx=trial["bonds"][0],
-        k_b=trial["bonds"][1],
-        r0=trial["bonds"][2],
-        angle_idx=trial["angles"][0],
-        k_theta=trial["angles"][1],
-        theta0=trial["angles"][2],
-        torsions=trial["torsions"],
-        impropers=trial["impropers"],
-        charges=trial["charges"],
-        sigmas=trial["sigmas"],
-        epsilons=trial["epsilons"],
-        molecule_id=trial["molecule_id"],
-        r_cut=float(ff.nb_options.r_cut),
-        dr_threshold=float(ff.nb_options.dr_threshold),
-    )
-
-    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-    R_probe = make_probe_geometry(
-        R,
-        P_atom=P_atom,
-        leave_F=cand.leave_F,
-        disp_fn=ff.disp_fn,
-        shift_fn=shift_fn,
-        r_pf_probe=r_pf_probe,
-    )
-
-    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
-        R_probe,
-        ff_trial=ff_trial,
-        shift_fn=shift_fn,
-        n_steps=30,
-        dt_start=1.0e-3,
-        f_inc=1.01,
-        dt_max=1.0e-2,
-        n_min=2,
-    )
-
-    if mc_energy_evaluator is None:
-       E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
-       E_after_arr.block_until_ready()
-       E_after = float(E_after_arr)
-    else:
-       E_after = mc_energy_evaluator.energy(R_relaxed)
-
-    dE = E_after - E_before
-    key, accepted, p_acc = accept_reject(key, dE, beta)
-
-    candidate_info = {
-        "k_pf6": cand.k_pf6,
-        "li_idx": cand.li_idx,
-        "leave_F": cand.leave_F,
-        "d_lif": cand.d_lif,
-        "d_pf": cand.d_pf,
-    }
-
-    if not accepted:
-        return key, False, ff, sys, {
-            "candidate": candidate_info,
-            "dE": dE,
-            "p_acc": p_acc,
-        }, R
-
-    pf6_reacted_np[cand.k_pf6] = True
-
-    sys_new = SystemState(
+def make_system_state_from_trial(
+    trial: dict,
+    pf6_reacted_np: np.ndarray,
+) -> SystemState:
+    return SystemState(
         bonds=(
             jnp.array(trial["bonds"][0], dtype=int),
             jnp.array(trial["bonds"][1]),
@@ -541,10 +474,195 @@ def maybe_react_one_event(
         pf6_reacted=jnp.array(pf6_reacted_np),
     )
 
+
+def build_trial_forcefield(R, box, trial: dict, ff_ref: FFBundle):
+    return build_forcefield(
+        R=R,
+        box=box,
+        bond_idx=trial["bonds"][0],
+        k_b=trial["bonds"][1],
+        r0=trial["bonds"][2],
+        angle_idx=trial["angles"][0],
+        k_theta=trial["angles"][1],
+        theta0=trial["angles"][2],
+        torsions=trial["torsions"],
+        impropers=trial["impropers"],
+        charges=trial["charges"],
+        sigmas=trial["sigmas"],
+        epsilons=trial["epsilons"],
+        molecule_id=trial["molecule_id"],
+        r_cut=float(ff_ref.nb_options.r_cut),
+        dr_threshold=float(ff_ref.nb_options.dr_threshold),
+    )
+
+
+def accept_reject(key, dE: float, beta: float):
+    p_acc = min(1.0, float(np.exp(-beta * dE)))
+    key, sub = jax.random.split(key)
+    u = float(jax.random.uniform(sub))
+    return key, (u < p_acc), p_acc
+
+
+def maybe_react_one_event(
+    key,
+    R,
+    box,
+    *,
+    shift_fn,
+    ff: FFBundle,
+    sys: SystemState,
+    pf6_atoms,
+    li_atoms,
+    atom_types,
+    pf5: PF5Template,
+    lif: LiFTemplate,
+    p_type: int,
+    f_type: int,
+    li_type: int,
+    r_lif_on: float,
+    r_pf_break: float,
+    r_pf_probe: float,
+    beta: float,
+    mc_energy_evaluator=None,
+    candidate_log_top_n: int = 10,
+):
+    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
+    li_atoms_np = np.array(li_atoms, dtype=np.int32)
+    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
+    atom_types_np = np.array(atom_types)
+
+    candidate_records = find_near_miss_candidates(
+        R,
+        pf6_atoms_np,
+        li_atoms_np,
+        ff.disp_fn,
+        r_lif_on=r_lif_on,
+        r_pf_break=r_pf_break,
+        pf6_reacted_np=pf6_reacted_np,
+        top_n=candidate_log_top_n,
+    )
+
+    cand = find_best_candidate(
+        R,
+        pf6_atoms_np,
+        li_atoms_np,
+        ff.disp_fn,
+        r_lif_on=r_lif_on,
+        r_pf_break=r_pf_break,
+        pf6_reacted_np=pf6_reacted_np,
+    )
+
+    if cand is None:
+        closest = find_closest_lif_pair(
+            R,
+            pf6_atoms_np,
+            li_atoms_np,
+            ff.disp_fn,
+            pf6_reacted_np=pf6_reacted_np,
+        )
+
+        info = {
+            "mode": "metropolis",
+            "candidate_records": candidate_records,
+        }
+
+        if closest is not None:
+            info["closest"] = {
+                "k_pf6": closest.k_pf6,
+                "li_idx": closest.li_idx,
+                "leave_F": closest.leave_F,
+                "d_lif": closest.d_lif,
+                "d_pf": closest.d_pf,
+            }
+
+        return key, False, ff, sys, info, R
+
+    if mc_energy_evaluator is None:
+        nlist_before = ff.neighbor_fn.update(R, ff.nlist)
+        E_before_arr = ff.energy_fn(R, nlist_before)["total"]
+        E_before_arr.block_until_ready()
+        E_before = float(E_before_arr)
+    else:
+        E_before = mc_energy_evaluator.energy(R)
+
+    trial, _pf6_molid = propose_reaction_trial(
+        sys,
+        cand,
+        pf6_atoms_np=pf6_atoms_np,
+        atom_types_np=atom_types_np,
+        pf5=pf5,
+        lif=lif,
+        p_type=p_type,
+        f_type=f_type,
+        li_type=li_type,
+    )
+
+    if trial is None:
+        return key, False, ff, sys, {
+            "mode": "metropolis",
+            "reason": "type_sanity_failed",
+            "candidate_records": candidate_records,
+        }, R
+
+    ff_trial = build_trial_forcefield(R, box, trial, ff)
+
+    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
+    R_probe = make_probe_geometry(
+        R,
+        P_atom=P_atom,
+        leave_F=cand.leave_F,
+        disp_fn=ff.disp_fn,
+        shift_fn=shift_fn,
+        r_pf_probe=r_pf_probe,
+    )
+
+    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+        R_probe,
+        ff_trial=ff_trial,
+        shift_fn=shift_fn,
+        n_steps=30,
+        dt_start=1.0e-3,
+        f_inc=1.01,
+        dt_max=1.0e-2,
+        n_min=2,
+    )
+
+    if mc_energy_evaluator is None:
+        E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
+        E_after_arr.block_until_ready()
+        E_after = float(E_after_arr)
+    else:
+        E_after = mc_energy_evaluator.energy(R_relaxed)
+
+    dE = E_after - E_before
+    key, accepted, p_acc = accept_reject(key, dE, beta)
+
+    candidate_info = {
+        "k_pf6": cand.k_pf6,
+        "li_idx": cand.li_idx,
+        "leave_F": cand.leave_F,
+        "d_lif": cand.d_lif,
+        "d_pf": cand.d_pf,
+    }
+
+    if not accepted:
+        return key, False, ff, sys, {
+            "mode": "metropolis",
+            "candidate": candidate_info,
+            "dE": dE,
+            "p_acc": p_acc,
+            "candidate_records": candidate_records,
+        }, R
+
+    pf6_reacted_np[cand.k_pf6] = True
+    sys_new = make_system_state_from_trial(trial, pf6_reacted_np)
+
     return key, True, ff_trial, sys_new, {
+        "mode": "metropolis",
         "accepted_event": candidate_info,
         "dE": dE,
         "p_acc": p_acc,
+        "candidate_records": candidate_records,
     }, R_relaxed
 
 
@@ -554,35 +672,49 @@ def maybe_react_rate_events(
     box,
     *,
     shift_fn,
-    ff,
-    sys,
+    ff: FFBundle,
+    sys: SystemState,
     pf6_atoms,
     li_atoms,
     atom_types,
-    pf5,
-    lif,
-    p_type,
-    f_type,
-    li_type,
-    r_lif_on,
-    r_pf_break,
-    r_pf_probe,
-    reaction_rate_ps,
-    reactive_interval_ps,
-    max_reactions_per_check=1,
+    pf5: PF5Template,
+    lif: LiFTemplate,
+    p_type: int,
+    f_type: int,
+    li_type: int,
+    r_lif_on: float,
+    r_pf_break: float,
+    r_pf_probe: float,
+    reaction_rate_ps: float,
+    reactive_interval_ps: float,
+    max_reactions_per_check: int = 1,
+    candidate_log_top_n: int = 10,
+    rate_pf_mode: str = "sigmoid",
+    rate_pf_mid: float = 1.62,
+    rate_pf_width: float = 0.02,
 ):
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidates = find_all_candidates(
+    candidate_records = find_near_miss_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
         r_lif_on=r_lif_on,
         r_pf_break=r_pf_break,
+        pf6_reacted_np=pf6_reacted_np,
+        top_n=candidate_log_top_n,
+    )
+
+    candidates = find_lif_contact_candidates(
+        R,
+        pf6_atoms_np,
+        li_atoms_np,
+        ff.disp_fn,
+        r_lif_on=r_lif_on,
         pf6_reacted_np=pf6_reacted_np,
     )
 
@@ -594,7 +726,22 @@ def maybe_react_rate_events(
             ff.disp_fn,
             pf6_reacted_np=pf6_reacted_np,
         )
-        info = {"mode": "rate", "n_candidates": 0}
+
+        info = {
+            "mode": "rate",
+            "rate_pf_mode": rate_pf_mode,
+            "rate_pf_mid": rate_pf_mid,
+            "rate_pf_width": rate_pf_width,
+            "n_candidates": 0,
+            "n_accepted_this_check": 0,
+            "p_rate": 0.0,
+            "k_rate_ps": reaction_rate_ps,
+            "k_eff_ps": 0.0,
+            "pf_rate_factor": 0.0,
+            "dt_reactive_ps": reactive_interval_ps,
+            "candidate_records": candidate_records,
+        }
+
         if closest is not None:
             info["closest"] = {
                 "k_pf6": closest.k_pf6,
@@ -603,14 +750,17 @@ def maybe_react_rate_events(
                 "d_lif": closest.d_lif,
                 "d_pf": closest.d_pf,
             }
-        return key, False, ff, sys, info, R
 
-    p_react = 1.0 - float(np.exp(-reaction_rate_ps * reactive_interval_ps))
+        return key, False, ff, sys, info, R
 
     accepted_events = []
     R_current = R
     ff_current = ff
     sys_current = sys
+
+    last_p_rate = 0.0
+    last_k_eff = 0.0
+    last_pf_factor = 0.0
 
     for cand in candidates:
         if len(accepted_events) >= max_reactions_per_check:
@@ -618,6 +768,21 @@ def maybe_react_rate_events(
 
         if pf6_reacted_np[cand.k_pf6]:
             continue
+
+        pf_factor = pf_rate_factor(
+            cand.d_pf,
+            mode=rate_pf_mode,
+            r_pf_break=r_pf_break,
+            pf_mid=rate_pf_mid,
+            pf_width=rate_pf_width,
+        )
+
+        k_eff = reaction_rate_ps * pf_factor
+        p_react = 1.0 - float(np.exp(-k_eff * reactive_interval_ps))
+
+        last_p_rate = p_react
+        last_k_eff = k_eff
+        last_pf_factor = pf_factor
 
         key, sub = jax.random.split(key)
         u = float(jax.random.uniform(sub))
@@ -640,24 +805,7 @@ def maybe_react_rate_events(
         if trial is None:
             continue
 
-        ff_trial = build_forcefield(
-            R=R_current,
-            box=box,
-            bond_idx=trial["bonds"][0],
-            k_b=trial["bonds"][1],
-            r0=trial["bonds"][2],
-            angle_idx=trial["angles"][0],
-            k_theta=trial["angles"][1],
-            theta0=trial["angles"][2],
-            torsions=trial["torsions"],
-            impropers=trial["impropers"],
-            charges=trial["charges"],
-            sigmas=trial["sigmas"],
-            epsilons=trial["epsilons"],
-            molecule_id=trial["molecule_id"],
-            r_cut=float(ff_current.nb_options.r_cut),
-            dr_threshold=float(ff_current.nb_options.dr_threshold),
-        )
+        ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
         R_probe = make_probe_geometry(
@@ -669,7 +817,7 @@ def maybe_react_rate_events(
             r_pf_probe=r_pf_probe,
         )
 
-        R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+        R_relaxed, _nlist_relaxed = fire_relax_with_nlist(
             R_probe,
             ff_trial=ff_trial,
             shift_fn=shift_fn,
@@ -681,36 +829,7 @@ def maybe_react_rate_events(
         )
 
         pf6_reacted_np[cand.k_pf6] = True
-
-        sys_current = SystemState(
-            bonds=(
-                jnp.array(trial["bonds"][0], dtype=int),
-                jnp.array(trial["bonds"][1]),
-                jnp.array(trial["bonds"][2]),
-            ),
-            angles=(
-                jnp.array(trial["angles"][0], dtype=int),
-                jnp.array(trial["angles"][1]),
-                jnp.array(trial["angles"][2]),
-            ),
-            torsions=(
-                jnp.array(trial["torsions"][0], dtype=int),
-                jnp.array(trial["torsions"][1]),
-                jnp.array(trial["torsions"][2]),
-                jnp.array(trial["torsions"][3]),
-            ),
-            impropers=(
-                jnp.array(trial["impropers"][0], dtype=int),
-                jnp.array(trial["impropers"][1]),
-                jnp.array(trial["impropers"][2]),
-                jnp.array(trial["impropers"][3]),
-            ),
-            charges=jnp.array(trial["charges"]),
-            sigmas=jnp.array(trial["sigmas"]),
-            epsilons=jnp.array(trial["epsilons"]),
-            molecule_id=jnp.array(trial["molecule_id"], dtype=int),
-            pf6_reacted=jnp.array(pf6_reacted_np),
-        )
+        sys_current = make_system_state_from_trial(trial, pf6_reacted_np)
 
         ff_current = ff_trial
         ff_current.nlist = ff_current.neighbor_fn.allocate(R_relaxed)
@@ -725,23 +844,46 @@ def maybe_react_rate_events(
                 "d_pf": cand.d_pf,
                 "p_rate": p_react,
                 "k_rate_ps": reaction_rate_ps,
+                "k_eff_ps": k_eff,
+                "pf_rate_factor": pf_factor,
                 "dt_reactive_ps": reactive_interval_ps,
+                "rate_pf_mode": rate_pf_mode,
             }
         )
 
     if not accepted_events:
         return key, False, ff, sys, {
             "mode": "rate",
+            "rate_pf_mode": rate_pf_mode,
+            "rate_pf_mid": rate_pf_mid,
+            "rate_pf_width": rate_pf_width,
             "n_candidates": len(candidates),
-            "p_rate": p_react,
+            "n_accepted_this_check": 0,
+            "p_rate": last_p_rate,
+            "k_rate_ps": reaction_rate_ps,
+            "k_eff_ps": last_k_eff,
+            "pf_rate_factor": last_pf_factor,
+            "dt_reactive_ps": reactive_interval_ps,
+            "candidate_records": candidate_records,
         }, R
+
+    first_event = accepted_events[0]
 
     return key, True, ff_current, sys_current, {
         "mode": "rate",
+        "rate_pf_mode": rate_pf_mode,
+        "rate_pf_mid": rate_pf_mid,
+        "rate_pf_width": rate_pf_width,
         "accepted_events": accepted_events,
-        "accepted_event": accepted_events[0],
+        "accepted_event": first_event,
         "n_candidates": len(candidates),
-        "p_rate": p_react,
+        "n_accepted_this_check": len(accepted_events),
+        "p_rate": first_event["p_rate"],
+        "k_rate_ps": reaction_rate_ps,
+        "k_eff_ps": first_event["k_eff_ps"],
+        "pf_rate_factor": first_event["pf_rate_factor"],
+        "dt_reactive_ps": reactive_interval_ps,
+        "candidate_records": candidate_records,
     }, R_current
 
 
@@ -756,9 +898,6 @@ def fire_relax_with_nlist(
     dt_max: float = 1.0e-2,
     n_min: int = 2,
 ):
-    """
-    Run FIRE minimization under trial topology, updating the neighbor list.
-    """
     def energy_scalar(R, *, nlist):
         return ff_trial.energy_fn(R, nlist)["total"]
 
