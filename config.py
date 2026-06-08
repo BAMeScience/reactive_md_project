@@ -16,14 +16,8 @@ class SimConfig:
     r_pf_break: float = 1.65
     r_pf_probe: float = 4.0
 
-    rate_pf_mode: str = "sigmoid"
-    rate_pf_mid: float = 1.62
-    rate_pf_width: float = 0.02
-
     reaction_mode: str = "metropolis"
-    reaction_rate_ps: float | None = None
-    activation_energy_eV: float | None = None
-    prefactor_ps: float | None = None
+    reaction_rate_ps: float = 0.0
     max_reactions_per_check: int = 1
 
     temperature_k: float = 400.0

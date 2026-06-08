@@ -254,13 +254,7 @@ def main(cfg: SimConfig):
                 r_lif_on=cfg.r_lif_on,
                 r_pf_break=cfg.r_pf_break,
                 r_pf_probe=cfg.r_pf_probe,
-                rate_pf_mode=cfg.rate_pf_mode,
-                rate_pf_mid=cfg.rate_pf_mid,
-                rate_pf_width=cfg.rate_pf_width,
                 reaction_rate_ps=cfg.reaction_rate_ps,
-                activation_energy_eV=cfg.activation_energy_eV,
-                temperature_k=cfg.temperature_k,
-                prefactor_ps=cfg.prefactor_ps,
                 reactive_interval_ps=cfg.check_every * cfg.dt,
                 max_reactions_per_check=cfg.max_reactions_per_check,
                 candidate_log_top_n=cfg.candidate_log_top_n,
@@ -339,10 +333,6 @@ def cli():
     parser.add_argument("--r-pf-break", type=float, default=None)
     parser.add_argument("--r-pf-probe", type=float, default=None)
 
-    parser.add_argument("--rate-pf-mode", choices=["hard", "sigmoid"], default=default_cfg.rate_pf_mode)
-    parser.add_argument("--rate-pf-mid", type=float, default=default_cfg.rate_pf_mid)
-    parser.add_argument("--rate-pf-width", type=float, default=default_cfg.rate_pf_width)
-
     parser.add_argument(
         "--reaction-mode",
         choices=["metropolis", "rate"],
@@ -353,18 +343,6 @@ def cli():
         type=float,
         default=default_cfg.reaction_rate_ps,
     )
-    parser.add_argument(
-        "--activation-energy-eV",
-        type=float,
-        default=default_cfg.activation_energy_eV,
-    )
-
-    parser.add_argument(
-        "--prefactor-ps",
-        type=float,
-        default=default_cfg.prefactor_ps,
-    )
-
     parser.add_argument(
         "--max-reactions-per-check",
         type=int,
@@ -431,13 +409,8 @@ def cli():
         r_lif_on=args.r_lif_on if args.r_lif_on is not None else default_cfg.r_lif_on,
         r_pf_break=args.r_pf_break if args.r_pf_break is not None else default_cfg.r_pf_break,
         r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
-        rate_pf_mode=args.rate_pf_mode,
-        rate_pf_mid=args.rate_pf_mid,
-        rate_pf_width=args.rate_pf_width,
         reaction_mode=args.reaction_mode,
         reaction_rate_ps=args.reaction_rate_ps,
-        activation_energy_eV=args.activation_energy_eV,
-        prefactor_ps=args.prefactor_ps,
         max_reactions_per_check=args.max_reactions_per_check,
         temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,

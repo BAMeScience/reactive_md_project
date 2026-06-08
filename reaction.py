@@ -13,50 +13,6 @@ from .templates_pf5 import PF5Template, LiFTemplate
 from .topology_opls import embed_pf5_into_pf6, remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
-### constants to compute rate constant from activation energy in eV
-K_B_SI = 1.380649e-23
-H_SI = 6.62607015e-34
-K_B_EV = 8.617333262145e-5
-
-
-def tst_rate_ps(
-    *,
-    temperature_k: float,
-    activation_energy_eV: float,
-    prefactor_ps: float | None = None,
-) -> float:
-    if prefactor_ps is None:
-        prefactor_ps = (K_B_SI * temperature_k / H_SI) * 1.0e-12
-
-    return float(
-        prefactor_ps
-        * np.exp(-activation_energy_eV / (K_B_EV * temperature_k))
-    )
-
-
-def resolve_rate_ps(
-    *,
-    reaction_rate_ps: float | None,
-    activation_energy_eV: float | None,
-    temperature_k: float,
-    prefactor_ps: float | None = None,
-) -> float:
-    if reaction_rate_ps is not None and activation_energy_eV is not None:
-        raise ValueError(
-            "Specify either reaction_rate_ps or activation_energy_eV, not both."
-        )
-
-    if reaction_rate_ps is not None:
-        return float(reaction_rate_ps)
-
-    if activation_energy_eV is not None:
-        return tst_rate_ps(
-            temperature_k=temperature_k,
-            activation_energy_eV=activation_energy_eV,
-            prefactor_ps=prefactor_ps,
-        )
-
-    return 0.0
 
 @dataclass
 class SystemState:
@@ -85,24 +41,22 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
     return float(np.linalg.norm(dr))
 
 
-def pf_rate_factor(
-    d_pf: float,
-    *,
-    mode: str,
-    r_pf_break: float,
-    pf_mid: float,
-    pf_width: float,
-) -> float:
-    if mode == "hard":
-        return 1.0 if d_pf > r_pf_break else 0.0
+def candidate_to_record(c: Candidate, *, rank: int, r_lif_on: float, r_pf_break: float):
+    passes_lif = c.d_lif < r_lif_on
+    passes_pf = c.d_pf > r_pf_break
 
-    if mode == "sigmoid":
-        if pf_width <= 0.0:
-            raise ValueError("rate_pf_width must be positive for sigmoid mode.")
-        x = (d_pf - pf_mid) / pf_width
-        return float(1.0 / (1.0 + np.exp(-x)))
-
-    raise ValueError(f"Unknown rate_pf_mode: {mode!r}")
+    return {
+        "rank": int(rank),
+        "k_pf6": int(c.k_pf6),
+        "li_idx": int(c.li_idx),
+        "leave_F": int(c.leave_F),
+        "d_lif": float(c.d_lif),
+        "d_pf": float(c.d_pf),
+        "q_pf_minus_lif": float(c.d_pf - c.d_lif),
+        "passes_lif": int(passes_lif),
+        "passes_pf": int(passes_pf),
+        "passes_all": int(passes_lif and passes_pf),
+    }
 
 
 def find_near_miss_candidates(
@@ -167,56 +121,6 @@ def find_near_miss_candidates(
     return records
 
 
-def find_lif_contact_candidates(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
-    *,
-    r_lif_on: float,
-    pf6_reacted_np: np.ndarray,
-):
-    """
-    Rate-mode candidate pool.
-
-    This intentionally uses only the Li-F contact gate. The P-F geometry enters
-    later through a smooth rate factor, not as a hard candidate filter.
-    """
-    Rj = jnp.asarray(R)
-    candidates = []
-
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                if d_lif >= r_lif_on:
-                    continue
-
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                candidates.append(
-                    Candidate(
-                        k_pf6=int(k),
-                        li_idx=li_idx,
-                        leave_F=f_idx,
-                        d_lif=float(d_lif),
-                        d_pf=float(d_pf),
-                    )
-                )
-
-    candidates.sort(key=lambda c: (c.d_lif, -c.d_pf))
-    return candidates
-
-
 def find_all_candidates(
     R,
     pf6_atoms_np: np.ndarray,
@@ -227,9 +131,6 @@ def find_all_candidates(
     r_pf_break: float,
     pf6_reacted_np: np.ndarray,
 ):
-    """
-    Hard-gated candidate finder used by Metropolis mode.
-    """
     Rj = jnp.asarray(R)
     candidates = []
 
@@ -282,8 +183,10 @@ def find_best_candidate(
         r_pf_break=r_pf_break,
         pf6_reacted_np=pf6_reacted_np,
     )
+
     if not candidates:
         return None
+
     return candidates[0]
 
 
@@ -729,28 +632,15 @@ def maybe_react_rate_events(
     r_lif_on: float,
     r_pf_break: float,
     r_pf_probe: float,
-    reaction_rate_ps: float | None,
-    activation_energy_eV: float | None,
-    temperature_k: float,
-    prefactor_ps: float | None,
+    reaction_rate_ps: float,
     reactive_interval_ps: float,
     max_reactions_per_check: int = 1,
     candidate_log_top_n: int = 10,
-    rate_pf_mode: str = "sigmoid",
-    rate_pf_mid: float = 1.62,
-    rate_pf_width: float = 0.02,
 ):
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
-
-    base_rate_ps = resolve_rate_ps(
-     reaction_rate_ps=reaction_rate_ps,
-     activation_energy_eV=activation_energy_eV,
-     temperature_k=temperature_k,
-     prefactor_ps=prefactor_ps,
-    )
 
     candidate_records = find_near_miss_candidates(
         R,
@@ -763,12 +653,13 @@ def maybe_react_rate_events(
         top_n=candidate_log_top_n,
     )
 
-    candidates = find_lif_contact_candidates(
+    candidates = find_all_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
         r_lif_on=r_lif_on,
+        r_pf_break=r_pf_break,
         pf6_reacted_np=pf6_reacted_np,
     )
 
@@ -783,15 +674,10 @@ def maybe_react_rate_events(
 
         info = {
             "mode": "rate",
-            "rate_pf_mode": rate_pf_mode,
-            "rate_pf_mid": rate_pf_mid,
-            "rate_pf_width": rate_pf_width,
             "n_candidates": 0,
             "n_accepted_this_check": 0,
             "p_rate": 0.0,
-            "k_rate_ps": base_rate_ps,
-            "k_eff_ps": 0.0,
-            "pf_rate_factor": 0.0,
+            "k_rate_ps": reaction_rate_ps,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }
@@ -807,14 +693,12 @@ def maybe_react_rate_events(
 
         return key, False, ff, sys, info, R
 
+    p_react = 1.0 - float(np.exp(-reaction_rate_ps * reactive_interval_ps))
+
     accepted_events = []
     R_current = R
     ff_current = ff
     sys_current = sys
-
-    last_p_rate = 0.0
-    last_k_eff = 0.0
-    last_pf_factor = 0.0
 
     for cand in candidates:
         if len(accepted_events) >= max_reactions_per_check:
@@ -822,21 +706,6 @@ def maybe_react_rate_events(
 
         if pf6_reacted_np[cand.k_pf6]:
             continue
-
-        pf_factor = pf_rate_factor(
-            cand.d_pf,
-            mode=rate_pf_mode,
-            r_pf_break=r_pf_break,
-            pf_mid=rate_pf_mid,
-            pf_width=rate_pf_width,
-        )
-
-        k_eff = base_rate_ps * pf_factor
-        p_react = 1.0 - float(np.exp(-k_eff * reactive_interval_ps))
-
-        last_p_rate = p_react
-        last_k_eff = k_eff
-        last_pf_factor = pf_factor
 
         key, sub = jax.random.split(key)
         u = float(jax.random.uniform(sub))
@@ -897,48 +766,30 @@ def maybe_react_rate_events(
                 "d_lif": cand.d_lif,
                 "d_pf": cand.d_pf,
                 "p_rate": p_react,
-                "k_rate_ps": base_rate_ps,
-                "k_eff_ps": k_eff,
-                "pf_rate_factor": pf_factor,
+                "k_rate_ps": reaction_rate_ps,
                 "dt_reactive_ps": reactive_interval_ps,
-                "rate_pf_mode": rate_pf_mode,
             }
         )
 
     if not accepted_events:
         return key, False, ff, sys, {
             "mode": "rate",
-            "rate_pf_mode": rate_pf_mode,
-            "rate_pf_mid": rate_pf_mid,
-            "rate_pf_width": rate_pf_width,
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
-            "p_rate": last_p_rate,
-            "k_rate_ps": base_rate_ps,
-            "k_eff_ps": last_k_eff,
-            "pf_rate_factor": last_pf_factor,
+            "p_rate": p_react,
+            "k_rate_ps": reaction_rate_ps,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
 
-    first_event = accepted_events[0]
-
     return key, True, ff_current, sys_current, {
         "mode": "rate",
-        "rate_pf_mode": rate_pf_mode,
-        "rate_pf_mid": rate_pf_mid,
-        "rate_pf_width": rate_pf_width,
         "accepted_events": accepted_events,
-        "accepted_event": first_event,
+        "accepted_event": accepted_events[0],
         "n_candidates": len(candidates),
         "n_accepted_this_check": len(accepted_events),
-        "p_rate": first_event["p_rate"],
-        "k_rate_ps": base_rate_ps,
-        "activation_energy_eV": activation_energy_eV,
-        "temperature_k": temperature_k,
-        "prefactor_ps": prefactor_ps,
-        "k_eff_ps": first_event["k_eff_ps"],
-        "pf_rate_factor": first_event["pf_rate_factor"],
+        "p_rate": p_react,
+        "k_rate_ps": reaction_rate_ps,
         "dt_reactive_ps": reactive_interval_ps,
         "candidate_records": candidate_records,
     }, R_current
