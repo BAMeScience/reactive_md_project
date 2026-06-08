@@ -13,6 +13,50 @@ from .templates_pf5 import PF5Template, LiFTemplate
 from .topology_opls import embed_pf5_into_pf6, remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
+### constants to compute rate constant from activation energy in eV
+K_B_SI = 1.380649e-23
+H_SI = 6.62607015e-34
+K_B_EV = 8.617333262145e-5
+
+
+def tst_rate_ps(
+    *,
+    temperature_k: float,
+    activation_energy_eV: float,
+    prefactor_ps: float | None = None,
+) -> float:
+    if prefactor_ps is None:
+        prefactor_ps = (K_B_SI * temperature_k / H_SI) * 1.0e-12
+
+    return float(
+        prefactor_ps
+        * np.exp(-activation_energy_eV / (K_B_EV * temperature_k))
+    )
+
+
+def resolve_rate_ps(
+    *,
+    reaction_rate_ps: float | None,
+    activation_energy_eV: float | None,
+    temperature_k: float,
+    prefactor_ps: float | None = None,
+) -> float:
+    if reaction_rate_ps is not None and activation_energy_eV is not None:
+        raise ValueError(
+            "Specify either reaction_rate_ps or activation_energy_eV, not both."
+        )
+
+    if reaction_rate_ps is not None:
+        return float(reaction_rate_ps)
+
+    if activation_energy_eV is not None:
+        return tst_rate_ps(
+            temperature_k=temperature_k,
+            activation_energy_eV=activation_energy_eV,
+            prefactor_ps=prefactor_ps,
+        )
+
+    return 0.0
 
 @dataclass
 class SystemState:
@@ -685,7 +729,10 @@ def maybe_react_rate_events(
     r_lif_on: float,
     r_pf_break: float,
     r_pf_probe: float,
-    reaction_rate_ps: float,
+    reaction_rate_ps: float | None,
+    activation_energy_eV: float | None,
+    temperature_k: float,
+    prefactor_ps: float | None,
     reactive_interval_ps: float,
     max_reactions_per_check: int = 1,
     candidate_log_top_n: int = 10,
@@ -697,6 +744,13 @@ def maybe_react_rate_events(
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
+
+    base_rate_ps = resolve_rate_ps(
+     reaction_rate_ps=reaction_rate_ps,
+     activation_energy_eV=activation_energy_eV,
+     temperature_k=temperature_k,
+     prefactor_ps=prefactor_ps,
+    )
 
     candidate_records = find_near_miss_candidates(
         R,
@@ -735,7 +789,7 @@ def maybe_react_rate_events(
             "n_candidates": 0,
             "n_accepted_this_check": 0,
             "p_rate": 0.0,
-            "k_rate_ps": reaction_rate_ps,
+            "k_rate_ps": base_rate_ps,
             "k_eff_ps": 0.0,
             "pf_rate_factor": 0.0,
             "dt_reactive_ps": reactive_interval_ps,
@@ -777,7 +831,7 @@ def maybe_react_rate_events(
             pf_width=rate_pf_width,
         )
 
-        k_eff = reaction_rate_ps * pf_factor
+        k_eff = base_rate_ps * pf_factor
         p_react = 1.0 - float(np.exp(-k_eff * reactive_interval_ps))
 
         last_p_rate = p_react
@@ -843,7 +897,7 @@ def maybe_react_rate_events(
                 "d_lif": cand.d_lif,
                 "d_pf": cand.d_pf,
                 "p_rate": p_react,
-                "k_rate_ps": reaction_rate_ps,
+                "k_rate_ps": base_rate_ps,
                 "k_eff_ps": k_eff,
                 "pf_rate_factor": pf_factor,
                 "dt_reactive_ps": reactive_interval_ps,
@@ -860,7 +914,7 @@ def maybe_react_rate_events(
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
             "p_rate": last_p_rate,
-            "k_rate_ps": reaction_rate_ps,
+            "k_rate_ps": base_rate_ps,
             "k_eff_ps": last_k_eff,
             "pf_rate_factor": last_pf_factor,
             "dt_reactive_ps": reactive_interval_ps,
@@ -879,7 +933,10 @@ def maybe_react_rate_events(
         "n_candidates": len(candidates),
         "n_accepted_this_check": len(accepted_events),
         "p_rate": first_event["p_rate"],
-        "k_rate_ps": reaction_rate_ps,
+        "k_rate_ps": base_rate_ps,
+        "activation_energy_eV": activation_energy_eV,
+        "temperature_k": temperature_k,
+        "prefactor_ps": prefactor_ps,
         "k_eff_ps": first_event["k_eff_ps"],
         "pf_rate_factor": first_event["pf_rate_factor"],
         "dt_reactive_ps": reactive_interval_ps,

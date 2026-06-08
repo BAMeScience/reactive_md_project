@@ -21,7 +21,9 @@ class SimConfig:
     rate_pf_width: float = 0.02
 
     reaction_mode: str = "metropolis"
-    reaction_rate_ps: float = 0.0
+    reaction_rate_ps: float | None = None
+    activation_energy_eV: float | None = None
+    prefactor_ps: float | None = None
     max_reactions_per_check: int = 1
 
     temperature_k: float = 400.0
