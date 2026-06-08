@@ -55,8 +55,35 @@ def _write_event_header(event_file):
         return
 
     event_file.write(
-        "step,event,event_index,pf6_index,li_idx,leave_F,"
+        "step,event,event_index,mode,n_candidates,n_accepted_this_check,"
+        "p_rate,k_rate_ps,dt_reactive_ps,"
+        "pf6_index,li_idx,leave_F,"
         "d_lif,d_pf,q_pf_minus_lif,dE,p_acc,reacted_count\n"
+    )
+    event_file.flush()
+
+
+def _write_rate_check(
+    *,
+    event_file,
+    step: int,
+    info: dict,
+    reacted_count: int,
+):
+    if event_file is None:
+        return
+    if info.get("mode") != "rate":
+        return
+
+    event_file.write(
+        f"{step},rate_check,,rate,"
+        f"{info.get('n_candidates', '')},"
+        f"{info.get('n_accepted_this_check', 0)},"
+        f"{info.get('p_rate', '')},"
+        f"{info.get('k_rate_ps', '')},"
+        f"{info.get('dt_reactive_ps', '')},"
+        ",,,,,,,,"
+        f"{reacted_count}\n"
     )
     event_file.flush()
 
@@ -76,24 +103,85 @@ def _write_accepted_event(
     d_lif = event.get("d_lif")
     d_pf = event.get("d_pf")
 
+    q_pf_minus_lif = ""
     if d_lif is not None and d_pf is not None:
         q_pf_minus_lif = float(d_pf) - float(d_lif)
-    else:
-        q_pf_minus_lif = ""
 
     event_file.write(
         f"{step},accepted,{event_index},"
+        f"{info.get('mode', 'metropolis')},"
+        f"{info.get('n_candidates', '')},"
+        f"{info.get('n_accepted_this_check', 1)},"
+        f"{info.get('p_rate', '')},"
+        f"{info.get('k_rate_ps', '')},"
+        f"{info.get('dt_reactive_ps', '')},"
         f"{event.get('k_pf6')},"
         f"{event.get('li_idx')},"
         f"{event.get('leave_F')},"
         f"{d_lif},"
         f"{d_pf},"
         f"{q_pf_minus_lif},"
-        f"{info.get('dE')},"
-        f"{info.get('p_acc')},"
+        f"{info.get('dE', '')},"
+        f"{info.get('p_acc', '')},"
         f"{reacted_count}\n"
     )
     event_file.flush()
+
+
+def _write_candidate_header(candidate_file):
+    if candidate_file is None:
+        return
+
+    candidate_file.write(
+        "step,mode,rank,pf6_index,li_idx,leave_F,"
+        "d_lif,d_pf,q_pf_minus_lif,"
+        "passes_lif,passes_pf,passes_all,accepted\n"
+    )
+    candidate_file.flush()
+
+
+def _write_candidate_records(
+    *,
+    candidate_file,
+    step: int,
+    info: dict,
+):
+    if candidate_file is None:
+        return
+
+    mode = info.get("mode", "metropolis")
+
+    accepted_event = info.get("accepted_event", {})
+    accepted_key = (
+        accepted_event.get("k_pf6"),
+        accepted_event.get("li_idx"),
+        accepted_event.get("leave_F"),
+    )
+
+    for rec in info.get("candidate_records", []):
+        key = (
+            rec.get("k_pf6"),
+            rec.get("li_idx"),
+            rec.get("leave_F"),
+        )
+
+        accepted = int(key == accepted_key)
+
+        candidate_file.write(
+            f"{step},{mode},{rec.get('rank')},"
+            f"{rec.get('k_pf6')},"
+            f"{rec.get('li_idx')},"
+            f"{rec.get('leave_F')},"
+            f"{rec.get('d_lif')},"
+            f"{rec.get('d_pf')},"
+            f"{rec.get('q_pf_minus_lif')},"
+            f"{rec.get('passes_lif')},"
+            f"{rec.get('passes_pf')},"
+            f"{rec.get('passes_all')},"
+            f"{accepted}\n"
+        )
+
+    candidate_file.flush()
 
 
 def run_md_nvt_with_reactions(
@@ -112,6 +200,7 @@ def run_md_nvt_with_reactions(
     dump_file=None,
     dump_writer=None,
     event_file=None,
+    candidate_file=None,
 ):
     kT = cfg.kb_real * cfg.temperature_k
     mass = jnp.asarray(masses)
@@ -165,6 +254,7 @@ def run_md_nvt_with_reactions(
         dump_every = cfg.check_every
 
     _write_event_header(event_file)
+    _write_candidate_header(candidate_file)
 
     _write_dump_frame_if_requested(
         dump_file=dump_file,
@@ -226,6 +316,19 @@ def run_md_nvt_with_reactions(
             sys,
         )
 
+        _write_rate_check(
+            event_file=event_file,
+            step=steps_done,
+            info=info,
+            reacted_count=int(jnp.sum(sys.pf6_reacted)),
+        )
+
+        _write_candidate_records(
+            candidate_file=candidate_file,
+            step=steps_done,
+            info=info,
+        )
+
         if accepted:
             accepted_events += 1
             event = info.get("accepted_event", {})
@@ -238,18 +341,33 @@ def run_md_nvt_with_reactions(
             if d_lif is not None and d_pf is not None:
                 q_text = f", q=d_PF-d_LiF={float(d_pf) - float(d_lif):.3f}"
 
-            print(
-                f"[step {steps_done}] TOPOLOGY CHANGE accepted "
-                f"event #{accepted_events}: "
-                f"pf6={event.get('k_pf6')}, "
-                f"Li={event.get('li_idx')}, "
-                f"F={event.get('leave_F')}, "
-                f"d_LiF={float(d_lif):.3f}, "
-                f"d_PF={float(d_pf):.3f}"
-                f"{q_text}, "
-                f"dE={float(info.get('dE')):.4f}, "
-                f"p={float(info.get('p_acc')):.3f}"
-            )
+            if info.get("mode") == "rate":
+                print(
+                    f"[step {steps_done}] RATE EVENT accepted "
+                    f"event #{accepted_events}: "
+                    f"pf6={event.get('k_pf6')}, "
+                    f"Li={event.get('li_idx')}, "
+                    f"F={event.get('leave_F')}, "
+                    f"d_LiF={float(d_lif):.3f}, "
+                    f"d_PF={float(d_pf):.3f}"
+                    f"{q_text}, "
+                    f"p_rate={float(info.get('p_rate')):.4f}, "
+                    f"n_candidates={info.get('n_candidates')}, "
+                    f"n_accepted_this_check={info.get('n_accepted_this_check')}"
+                )
+            else:
+                print(
+                    f"[step {steps_done}] TOPOLOGY CHANGE accepted "
+                    f"event #{accepted_events}: "
+                    f"pf6={event.get('k_pf6')}, "
+                    f"Li={event.get('li_idx')}, "
+                    f"F={event.get('leave_F')}, "
+                    f"d_LiF={float(d_lif):.3f}, "
+                    f"d_PF={float(d_pf):.3f}"
+                    f"{q_text}, "
+                    f"dE={float(info.get('dE')):.4f}, "
+                    f"p={float(info.get('p_acc')):.3f}"
+                )
 
             _write_accepted_event(
                 event_file=event_file,
@@ -270,8 +388,6 @@ def run_md_nvt_with_reactions(
             md_state = replace(md_state, position=R_new)
             ff.nlist = ff.neighbor_fn.allocate(R_new)
 
-            # Write a post-reaction frame at the same step. This makes topology
-            # changes visible even when they occur between normal dump intervals.
             _write_dump_frame_if_requested(
                 dump_file=dump_file,
                 dump_writer=dump_writer,
