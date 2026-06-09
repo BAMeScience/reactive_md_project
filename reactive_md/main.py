@@ -13,8 +13,8 @@ from jax_md import space
 
 from .extract_params_oplsaa import parse_lammps_data
 from .config import SimConfig
-from .templates_pf5 import make_pf5_template, make_lif_template
-from .topology_opls import discover_pf6_and_li
+from .reactions.templates_pf5 import make_pf5_template, make_lif_template
+from .reactions.lipf6 import discover_pf6_and_li
 from .forcefield import build_forcefield
 from .reaction import (
     SystemState,
