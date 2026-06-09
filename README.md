@@ -267,7 +267,7 @@ If you use this software in academic work, please cite:
 
 * JAX-MD
 * MACE / MACE-JAX (if used)
-* The original rs@md methodology by Heuer and co-workers
+* The original rs@md methodology by Heuer and co-workers(J. Chem. Theory Comput. 2021, 17, 1074−1085)
 
 ---
 
