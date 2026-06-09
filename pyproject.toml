@@ -13,7 +13,8 @@ dependencies = [
     "numpy",
     "jax==0.10.1",
     "jaxlib==0.10.1",
-    "jax-md"
+    "jax-md",
+    "optax<0.2.6",
 ]
 
 [project.optional-dependencies]
@@ -21,9 +22,12 @@ dependencies = [
 mace = [
     "flax==0.12.2",
     "dm-haiku==0.0.16",
-    "mace-jax",
+    "mace-jax @ git+https://github.com/ACEsuit/mace-jax.git",
     "mace-torch",
 ]
+
+[tool.hatch.metadata]
+allow-direct-references = true 
 
 dev = [
     "pytest",
