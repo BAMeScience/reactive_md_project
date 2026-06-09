@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reactive-md"
+version = "0.1.0"
+description = "Reactive molecular dynamics framework with topology-changing reactions"
+readme = "README.md"
+requires-python = ">=3.12"
+
+dependencies = [
+    "numpy",
+    "jax==0.10.1",
+    "jaxlib==0.10.1",
+    "jax-md"
+]
+
+[project.optional-dependencies]
+
+mace = [
+    "flax==0.12.2",
+    "dm-haiku==0.0.16",
+    "mace-jax",
+    "mace-torch",
+]
+
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[project.scripts]
+reactive-md = "reactive_md.main:cli"
+
+[tool.hatch.build.targets.wheel]
+packages = ["reactive_md"]

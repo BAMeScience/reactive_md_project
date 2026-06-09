@@ -9,8 +9,9 @@ import jax
 import jax.numpy as jnp
 from jax_md.minimize import fire_descent
 
-from .templates_pf5 import PF5Template, LiFTemplate
-from .topology_opls import embed_pf5_into_pf6, remove_terms_in_molid
+from .reactions.templates_pf5 import PF5Template, LiFTemplate
+from .reactions.lipf6 import embed_pf5_into_pf6
+from .topology_opls import  remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
 ### constants to compute rate constant from activation energy in eV
