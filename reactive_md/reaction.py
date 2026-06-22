@@ -86,24 +86,64 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
     return float(np.linalg.norm(dr))
 
 
-def pf_rate_factor(
-    d_pf: float,
+def reaction_coordinate_sigma(d_pf: float, d_lif: float) -> float:
+    """
+    Reaction coordinate for LiPF6 -> LiF + PF5.
+
+    sigma = d(F-P) - d(Li-F)
+
+    sigma < 0: F is more PF6-like
+    sigma > 0: F is more LiF-like
+    """
+    return float(d_pf - d_lif)
+
+
+def smooth_gate_factor(
     *,
+    d_pf: float,
+    d_lif: float,
     mode: str,
+    coordinate: str = "sigma",
     r_pf_break: float,
-    pf_mid: float,
-    pf_width: float,
+    midpoint: float,
+    width: float,
 ) -> float:
+    """
+    Smooth geometric gate.
+
+    coordinate="pf_distance":
+        x = d(P-F)
+
+    coordinate="sigma":
+        x = d(P-F) - d(Li-F)
+
+    mode="hard":
+        returns 0 or 1
+
+    mode="sigmoid":
+        returns smooth value between 0 and 1
+    """
+
+    if coordinate == "pf_distance":
+        x = float(d_pf)
+        hard_threshold = float(r_pf_break)
+
+    elif coordinate == "sigma":
+        x = reaction_coordinate_sigma(d_pf=d_pf, d_lif=d_lif)
+        hard_threshold = float(midpoint)
+
+    else:
+        raise ValueError(f"Unknown reaction coordinate: {coordinate!r}")
+
     if mode == "hard":
-        return 1.0 if d_pf > r_pf_break else 0.0
+        return 1.0 if x > hard_threshold else 0.0
 
     if mode == "sigmoid":
-        if pf_width <= 0.0:
-            raise ValueError("rate_pf_width must be positive for sigmoid mode.")
-        x = (d_pf - pf_mid) / pf_width
-        return float(1.0 / (1.0 + np.exp(-x)))
+        if width <= 0.0:
+            raise ValueError("Gate width must be positive for sigmoid mode.")
+        return float(1.0 / (1.0 + np.exp(-(x - midpoint) / width)))
 
-    raise ValueError(f"Unknown rate_pf_mode: {mode!r}")
+    raise ValueError(f"Unknown gate mode: {mode!r}")
 
 
 def find_near_miss_candidates(
@@ -145,6 +185,7 @@ def find_near_miss_candidates(
                         "leave_F": f_idx,
                         "d_lif": float(d_lif),
                         "d_pf": float(d_pf),
+                        "sigma": float(d_pf - d_lif),
                         "q_pf_minus_lif": float(d_pf - d_lif),
                         "passes_lif": int(passes_lif),
                         "passes_pf": int(passes_pf),
@@ -570,7 +611,11 @@ def maybe_react_one_event(
     beta: float,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
-):
+    thermo_gate_mode: str = "sigmoid",
+    thermo_gate_coordinate: str = "sigma",
+    thermo_gate_mid: float = 0.0,
+    thermo_gate_width: float = 0.2,
+):    
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
@@ -621,6 +666,39 @@ def maybe_react_one_event(
             }
 
         return key, False, ff, sys, info, R
+
+
+    proposal_factor = smooth_gate_factor(
+    d_pf=cand.d_pf,
+    d_lif=cand.d_lif,
+    mode=thermo_gate_mode,
+    coordinate=thermo_gate_coordinate,
+    r_pf_break=r_pf_break,
+    midpoint=thermo_gate_mid,
+    width=thermo_gate_width,
+    )
+
+    #guard against exavt 0 -> increase numerical robustness
+    proposal_factor = float(np.clip(proposal_factor, 0.0, 1.0))
+
+    key, sub = jax.random.split(key)
+    u_prop = float(jax.random.uniform(sub))
+
+    if u_prop >= proposal_factor:
+       return key, False, ff, sys, {
+            "mode": "metropolis",
+            "candidate": {
+              "k_pf6": cand.k_pf6,
+              "li_idx": cand.li_idx,
+              "leave_F": cand.leave_F,
+              "d_lif": cand.d_lif,
+              "d_pf": cand.d_pf,
+              "sigma": cand.d_pf - cand.d_lif,
+            },
+            "proposal_factor": proposal_factor,
+            "u_proposal": u_prop,
+            "candidate_records": candidate_records,
+       }, R
 
     if mc_energy_evaluator is None:
         nlist_before = ff.neighbor_fn.update(R, ff.nlist)
@@ -738,8 +816,9 @@ def maybe_react_rate_events(
     max_reactions_per_check: int = 1,
     candidate_log_top_n: int = 10,
     rate_pf_mode: str = "sigmoid",
-    rate_pf_mid: float = 1.62,
-    rate_pf_width: float = 0.02,
+    rate_pf_mid: float = 0.0,
+    rate_pf_width: float = 0.2,
+    rate_gate_coordinate: str = "sigma"
 ):
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
@@ -824,12 +903,14 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        pf_factor = pf_rate_factor(
-            cand.d_pf,
-            mode=rate_pf_mode,
-            r_pf_break=r_pf_break,
-            pf_mid=rate_pf_mid,
-            pf_width=rate_pf_width,
+        pf_factor = smooth_gate_factor(
+          d_pf=cand.d_pf,
+          d_lif=cand.d_lif,
+          mode=rate_pf_mode,
+          coordinate=rate_gate_coordinate,
+          r_pf_break=r_pf_break,
+          midpoint=rate_pf_mid,
+          width=rate_pf_width,
         )
 
         k_eff = base_rate_ps * pf_factor
@@ -892,17 +973,19 @@ def maybe_react_rate_events(
 
         accepted_events.append(
             {
-                "k_pf6": cand.k_pf6,
-                "li_idx": cand.li_idx,
-                "leave_F": cand.leave_F,
-                "d_lif": cand.d_lif,
-                "d_pf": cand.d_pf,
-                "p_rate": p_react,
-                "k_rate_ps": base_rate_ps,
-                "k_eff_ps": k_eff,
-                "pf_rate_factor": pf_factor,
-                "dt_reactive_ps": reactive_interval_ps,
-                "rate_pf_mode": rate_pf_mode,
+                 "k_pf6": cand.k_pf6,
+                 "li_idx": cand.li_idx,
+                 "leave_F": cand.leave_F,
+                 "d_lif": cand.d_lif,
+                 "d_pf": cand.d_pf,
+                 "sigma": cand.d_pf - cand.d_lif,
+                 "p_rate": p_react,
+                 "k_rate_ps": base_rate_ps,
+                 "k_eff_ps": k_eff,
+                 "pf_rate_factor": pf_factor,
+                 "dt_reactive_ps": reactive_interval_ps,
+                 "rate_pf_mode": rate_pf_mode,
+                 "rate_gate_coordinate": rate_gate_coordinate,
             }
         )
 
