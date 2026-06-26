@@ -153,7 +153,7 @@ def reaction_probability_from_sigma(
     return p_react, k_eff_ps, sigma_factor
 
 
-def find_sigma_candidates(
+def find_reaction_candidates(
     R,
     pf6_atoms_np: np.ndarray,
     li_atoms_np: np.ndarray,
@@ -478,7 +478,7 @@ def maybe_react_one_event(
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidates = find_sigma_candidates(
+    candidates = find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
@@ -653,7 +653,7 @@ def maybe_react_rate_events(
      prefactor_ps=prefactor_ps,
     )
 
-    candidates = find_sigma_candidates(
+    candidates = find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
