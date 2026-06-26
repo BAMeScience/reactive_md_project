@@ -1,5 +1,5 @@
 import numpy as np
-from reactive_md.templates_pf5 import make_pf5_template, make_lif_template
+from reactive_md.reaction.templates_pf5 import make_pf5_template, make_lif_template
 
 def test_pf5_template_shapes_and_units():
     pf5 = make_pf5_template()

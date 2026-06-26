@@ -5,7 +5,7 @@ from reactive_md.topology_opls import (
     embed_pf5_into_pf6,
     remove_terms_in_molid,
 )
-from reactive_md.templates_pf5 import make_pf5_template
+from reactive_md.reactions.templates_pf5 import make_pf5_template
 
 def test_discover_pf6_and_li_simple():
     # 8 atoms: PF6 (0..6), Li (7)
