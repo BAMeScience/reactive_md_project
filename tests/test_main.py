@@ -86,6 +86,27 @@ def _fake_parse_lammps_data(data_file, settings_file):
     )
 
 
+def _fake_build_forcefield(**kwargs):
+    def disp_fn(a, b):
+        return b - a
+
+    neighbor_fn = types.SimpleNamespace(
+        allocate=lambda R: object(),
+        update=lambda R, nlist: nlist,
+    )
+
+    def energy_fn(R, nlist):
+        return {"total": jnp.array(0.0)}
+
+    return types.SimpleNamespace(
+        disp_fn=disp_fn,
+        neighbor_fn=neighbor_fn,
+        energy_fn=energy_fn,
+        nlist=object(),
+        nb_options=types.SimpleNamespace(r_cut=15.0, dr_threshold=0.5),
+    )
+
+
 def test_main_smoke_with_mocked_parser(monkeypatch):
     """main() should still run with mocked I/O and no MD production work."""
 
@@ -93,33 +114,11 @@ def test_main_smoke_with_mocked_parser(monkeypatch):
 
     captured = {}
 
-    def fake_build_forcefield(**kwargs):
-        captured["build_forcefield_kwargs"] = kwargs
-
-        def disp_fn(a, b):
-            return b - a
-
-        neighbor_fn = types.SimpleNamespace(
-            allocate=lambda R: object(),
-            update=lambda R, nlist: nlist,
-        )
-
-        def energy_fn(R, nlist):
-            return {"total": jnp.array(0.0)}
-
-        return types.SimpleNamespace(
-            disp_fn=disp_fn,
-            neighbor_fn=neighbor_fn,
-            energy_fn=energy_fn,
-            nlist=object(),
-            nb_options=types.SimpleNamespace(r_cut=15.0, dr_threshold=0.5),
-        )
-
     def fake_run_md_nvt_with_reactions(**kwargs):
         captured["run_kwargs"] = kwargs
         return types.SimpleNamespace(accepted_events=0)
 
-    monkeypatch.setattr(main_mod, "build_forcefield", fake_build_forcefield)
+    monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
     monkeypatch.setattr(
         main_mod,
         "run_md_nvt_with_reactions",
@@ -138,36 +137,17 @@ def test_main_smoke_with_mocked_parser(monkeypatch):
 
     main_mod.main(cfg)
 
-    assert "build_forcefield_kwargs" in captured
     assert "run_kwargs" in captured
     assert captured["run_kwargs"]["cfg"] is cfg
     assert callable(captured["run_kwargs"]["reaction_step_fn"])
 
 
-def test_reaction_step_fn_metropolis_passes_sigma_parameters(monkeypatch):
-    """The closure created in main() should pass sigma_mid/sigma_width onward."""
+def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
+    monkeypatch,
+):
+    """Metropolis mode uses sigma only for ranking; no sigma probability is passed."""
 
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
-
-    def fake_build_forcefield(**kwargs):
-        def disp_fn(a, b):
-            return b - a
-
-        neighbor_fn = types.SimpleNamespace(
-            allocate=lambda R: object(),
-            update=lambda R, nlist: nlist,
-        )
-
-        def energy_fn(R, nlist):
-            return {"total": jnp.array(0.0)}
-
-        return types.SimpleNamespace(
-            disp_fn=disp_fn,
-            neighbor_fn=neighbor_fn,
-            energy_fn=energy_fn,
-            nlist=object(),
-            nb_options=types.SimpleNamespace(r_cut=15.0, dr_threshold=0.5),
-        )
 
     captured = {}
 
@@ -179,12 +159,10 @@ def test_reaction_step_fn_metropolis_passes_sigma_parameters(monkeypatch):
         reaction_step_fn = kwargs["reaction_step_fn"]
         key = jnp.array([0, 0], dtype=jnp.uint32)
         R = jnp.zeros((8, 3), dtype=jnp.float32)
-        ff = kwargs["ff"]
-        sys = kwargs["sys"]
-        reaction_step_fn(key, R, ff, sys)
+        reaction_step_fn(key, R, kwargs["ff"], kwargs["sys"])
         return types.SimpleNamespace(accepted_events=0)
 
-    monkeypatch.setattr(main_mod, "build_forcefield", fake_build_forcefield)
+    monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
     monkeypatch.setattr(main_mod, "maybe_react_one_event", fake_maybe_react_one_event)
     monkeypatch.setattr(
         main_mod,
@@ -203,38 +181,27 @@ def test_reaction_step_fn_metropolis_passes_sigma_parameters(monkeypatch):
     main_mod.main(cfg)
 
     kwargs = captured["metropolis_kwargs"]
-    assert kwargs["sigma_mid"] == 0.25
-    assert kwargs["sigma_width"] == 0.05
+
+    assert kwargs["r_pf_probe"] == cfg.r_pf_probe
+    assert "beta" in kwargs
+    assert "mc_energy_evaluator" in kwargs
+    assert "candidate_log_top_n" in kwargs
+
+    # Removed legacy / proposal-gate parameters.
+    assert "sigma_mid" not in kwargs
+    assert "sigma_width" not in kwargs
     assert "r_lif_on" not in kwargs
     assert "r_pf_break" not in kwargs
     assert "thermo_gate_mode" not in kwargs
     assert "thermo_gate_coordinate" not in kwargs
 
 
-def test_reaction_step_fn_rate_passes_sigma_parameters(monkeypatch):
-    """Rate mode should also use sigma_mid/sigma_width, not old rate_pf_* gates."""
+def test_reaction_step_fn_rate_still_passes_sigma_probability_parameters(
+    monkeypatch,
+):
+    """Rate mode still uses sigma_mid/sigma_width for the sigma-dependent rate factor."""
 
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
-
-    def fake_build_forcefield(**kwargs):
-        def disp_fn(a, b):
-            return b - a
-
-        neighbor_fn = types.SimpleNamespace(
-            allocate=lambda R: object(),
-            update=lambda R, nlist: nlist,
-        )
-
-        def energy_fn(R, nlist):
-            return {"total": jnp.array(0.0)}
-
-        return types.SimpleNamespace(
-            disp_fn=disp_fn,
-            neighbor_fn=neighbor_fn,
-            energy_fn=energy_fn,
-            nlist=object(),
-            nb_options=types.SimpleNamespace(r_cut=15.0, dr_threshold=0.5),
-        )
 
     captured = {}
 
@@ -246,12 +213,10 @@ def test_reaction_step_fn_rate_passes_sigma_parameters(monkeypatch):
         reaction_step_fn = kwargs["reaction_step_fn"]
         key = jnp.array([0, 0], dtype=jnp.uint32)
         R = jnp.zeros((8, 3), dtype=jnp.float32)
-        ff = kwargs["ff"]
-        sys = kwargs["sys"]
-        reaction_step_fn(key, R, ff, sys)
+        reaction_step_fn(key, R, kwargs["ff"], kwargs["sys"])
         return types.SimpleNamespace(accepted_events=0)
 
-    monkeypatch.setattr(main_mod, "build_forcefield", fake_build_forcefield)
+    monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
     monkeypatch.setattr(main_mod, "maybe_react_rate_events", fake_maybe_react_rate_events)
     monkeypatch.setattr(
         main_mod,
@@ -271,8 +236,13 @@ def test_reaction_step_fn_rate_passes_sigma_parameters(monkeypatch):
     main_mod.main(cfg)
 
     kwargs = captured["rate_kwargs"]
+
     assert kwargs["sigma_mid"] == -0.1
     assert kwargs["sigma_width"] == 0.15
+    assert kwargs["reaction_rate_ps"] == 1.0
+    assert kwargs["reactive_interval_ps"] == cfg.check_every * cfg.dt
+
+    # Removed legacy hard-gate / old rate-gate parameters.
     assert "r_lif_on" not in kwargs
     assert "r_pf_break" not in kwargs
     assert "rate_pf_mode" not in kwargs
