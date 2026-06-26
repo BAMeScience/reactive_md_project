@@ -230,7 +230,8 @@ def candidate_records_from_sigma_candidates(
         )
     return records
 
-
+#make_probe_geometry:
+#moves the leaving F away from P before relaxation, so the new PF₅ topology does not start with the removed F still sitting inside the old PF₆ geometry.
 def make_probe_geometry(
     R,
     *,
