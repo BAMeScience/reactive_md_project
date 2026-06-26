@@ -73,7 +73,7 @@ class SystemState:
 
 
 @dataclass(frozen=True)
-class Candidate:
+class ReactionCandidate:
     k_pf6: int
     li_idx: int
     leave_F: int
@@ -98,9 +98,9 @@ def reaction_coordinate(d_pf: float, d_lif: float) -> float:
     return float(d_pf - d_lif)
 
 
-def sigma_gate_factor(
-    *,
+def reaction_probability(
     sigma: float,
+    *,
     midpoint: float = 0.0,
     width: float = 0.2,
 ) -> float:
@@ -123,7 +123,7 @@ def sigma_gate_factor(
     return float(1.0 / (1.0 + np.exp(-z)))
 
 
-def reaction_probability_from_sigma(
+def rate_probability_from_reaction_coordinate(
     *,
     sigma: float,
     base_rate_ps: float,
@@ -143,8 +143,8 @@ def reaction_probability_from_sigma(
     sigma_factor:
         Dimensionless factor between 0 and 1.
     """
-    sigma_factor = sigma_gate_factor(
-        sigma=sigma,
+    sigma_factor = reaction_probability(
+        sigma,
         midpoint=midpoint,
         width=width,
     )
@@ -153,7 +153,7 @@ def reaction_probability_from_sigma(
     return p_react, k_eff_ps, sigma_factor
 
 
-def find_reaction_candidates(
+def find_sigma_candidates(
     R,
     pf6_atoms_np: np.ndarray,
     li_atoms_np: np.ndarray,
@@ -187,7 +187,7 @@ def find_reaction_candidates(
                 d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
 
                 candidates.append(
-                    Candidate(
+                    ReactionCandidate(
                         k_pf6=int(k),
                         li_idx=li_idx,
                         leave_F=f_idx,
@@ -204,7 +204,7 @@ def find_reaction_candidates(
 
 
 def candidate_records_from_sigma_candidates(
-    candidates: list[Candidate],
+    candidates: list[ReactionCandidate],
     *,
     top_n: int = 10,
 ) -> list[dict]:
@@ -230,7 +230,7 @@ def candidate_records_from_sigma_candidates(
         )
     return records
 
-#probe geometry: moves the leaving F away from P before relaxation, so the new PF₅ topology does not start with the removed F still sitting inside the old PF₆ geometry.
+
 def make_probe_geometry(
     R,
     *,
@@ -255,7 +255,7 @@ def make_probe_geometry(
 
 def propose_reaction_trial(
     sys: SystemState,
-    cand: Candidate,
+    cand: ReactionCandidate,
     *,
     pf6_atoms_np: np.ndarray,
     atom_types_np: np.ndarray,
@@ -478,7 +478,7 @@ def maybe_react_one_event(
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidates = find_reaction_candidates(
+    candidates = find_sigma_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
@@ -498,8 +498,8 @@ def maybe_react_one_event(
 
     cand = candidates[0]
     sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
-    proposal_factor = sigma_gate_factor(
-        sigma=sigma,
+    proposal_factor = reaction_probability(
+        sigma,
         midpoint=sigma_mid,
         width=sigma_width,
     )
@@ -653,7 +653,7 @@ def maybe_react_rate_events(
      prefactor_ps=prefactor_ps,
     )
 
-    candidates = find_reaction_candidates(
+    candidates = find_sigma_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
@@ -697,7 +697,7 @@ def maybe_react_rate_events(
             continue
 
         sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
-        p_react, k_eff, pf_factor = reaction_probability_from_sigma(
+        p_react, k_eff, pf_factor = rate_probability_from_reaction_coordinate(
             sigma=sigma,
             base_rate_ps=base_rate_ps,
             reactive_interval_ps=reactive_interval_ps,
