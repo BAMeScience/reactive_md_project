@@ -58,7 +58,7 @@ def _write_event_header(event_file):
         "step,event,event_index,mode,n_candidates,n_accepted_this_check,"
         "p_rate,k_rate_ps,dt_reactive_ps,"
         "pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,q_pf_minus_lif,dE,p_acc,reacted_count\n"
+        "d_lif,d_pf,sigma,dE,p_acc,reacted_count\n"
     )
     event_file.flush()
 
@@ -103,9 +103,9 @@ def _write_accepted_event(
     d_lif = event.get("d_lif")
     d_pf = event.get("d_pf")
 
-    q_pf_minus_lif = ""
-    if d_lif is not None and d_pf is not None:
-        q_pf_minus_lif = float(d_pf) - float(d_lif)
+    sigma = event.get("sigma", "")
+    if sigma == "" and d_lif is not None and d_pf is not None:
+        sigma = float(d_pf) - float(d_lif)
 
     event_file.write(
         f"{step},accepted,{event_index},"
@@ -120,7 +120,7 @@ def _write_accepted_event(
         f"{event.get('leave_F')},"
         f"{d_lif},"
         f"{d_pf},"
-        f"{q_pf_minus_lif},"
+        f"{sigma},"
         f"{info.get('dE', '')},"
         f"{info.get('p_acc', '')},"
         f"{reacted_count}\n"
@@ -134,8 +134,7 @@ def _write_candidate_header(candidate_file):
 
     candidate_file.write(
         "step,mode,rank,pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,q_pf_minus_lif,"
-        "passes_lif,passes_pf,passes_all,accepted\n"
+        "d_lif,d_pf,sigma,accepted\n"
     )
     candidate_file.flush()
 
@@ -167,6 +166,15 @@ def _write_candidate_records(
 
         accepted = int(key == accepted_key)
 
+        sigma = rec.get("sigma")
+        if sigma is None:
+            d_lif = rec.get("d_lif")
+            d_pf = rec.get("d_pf")
+            if d_lif is not None and d_pf is not None:
+                sigma = float(d_pf) - float(d_lif)
+            else:
+                sigma = ""
+
         candidate_file.write(
             f"{step},{mode},{rec.get('rank')},"
             f"{rec.get('k_pf6')},"
@@ -174,10 +182,7 @@ def _write_candidate_records(
             f"{rec.get('leave_F')},"
             f"{rec.get('d_lif')},"
             f"{rec.get('d_pf')},"
-            f"{rec.get('q_pf_minus_lif')},"
-            f"{rec.get('passes_lif')},"
-            f"{rec.get('passes_pf')},"
-            f"{rec.get('passes_all')},"
+            f"{sigma},"
             f"{accepted}\n"
         )
 
@@ -337,9 +342,13 @@ def run_md_nvt_with_reactions(
 
             d_lif = event.get("d_lif")
             d_pf = event.get("d_pf")
-            q_text = ""
-            if d_lif is not None and d_pf is not None:
-                q_text = f", q=d_PF-d_LiF={float(d_pf) - float(d_lif):.3f}"
+            sigma = event.get("sigma")
+            if sigma is None and d_lif is not None and d_pf is not None:
+                sigma = float(d_pf) - float(d_lif)
+
+            sigma_text = ""
+            if sigma is not None:
+                sigma_text = f", sigma={float(sigma):.3f}"
 
             if info.get("mode") == "rate":
                 print(
@@ -350,7 +359,7 @@ def run_md_nvt_with_reactions(
                     f"F={event.get('leave_F')}, "
                     f"d_LiF={float(d_lif):.3f}, "
                     f"d_PF={float(d_pf):.3f}"
-                    f"{q_text}, "
+                    f"{sigma_text}, "
                     f"p_rate={float(info.get('p_rate')):.4f}, "
                     f"n_candidates={info.get('n_candidates')}, "
                     f"n_accepted_this_check={info.get('n_accepted_this_check')}"
@@ -364,7 +373,7 @@ def run_md_nvt_with_reactions(
                     f"F={event.get('leave_F')}, "
                     f"d_LiF={float(d_lif):.3f}, "
                     f"d_PF={float(d_pf):.3f}"
-                    f"{q_text}, "
+                    f"{sigma_text}, "
                     f"dE={float(info.get('dE')):.4f}, "
                     f"p={float(info.get('p_acc')):.3f}"
                 )
@@ -406,22 +415,52 @@ def run_md_nvt_with_reactions(
         else:
             if "candidate" in info:
                 cand_info = info["candidate"]
+                sigma = cand_info.get("sigma")
+                if sigma is None:
+                    sigma = float(cand_info["d_pf"]) - float(cand_info["d_lif"])
+
+                extra = ""
+                if "dE" in info:
+                    extra += f", dE={float(info['dE']):.4f}"
+                if "p_acc" in info:
+                    extra += f", p_acc={float(info['p_acc']):.3f}"
+                if "proposal_factor" in info:
+                    extra += f", proposal_factor={float(info['proposal_factor']):.3f}"
+
                 print(
-                    " Rejected candidate: "
+                    " No reaction accepted for candidate: "
                     f"pf6={cand_info['k_pf6']}, Li={cand_info['li_idx']}, "
                     f"F={cand_info['leave_F']}, "
                     f"d_LiF={cand_info['d_lif']:.3f}, "
                     f"d_PF={cand_info['d_pf']:.3f}, "
-                    f"dE={info['dE']:.4f}, p={info['p_acc']:.3f}"
+                    f"sigma={float(sigma):.3f}"
+                    f"{extra}"
+                )
+            elif "best_sigma_candidate" in info:
+                best = info["best_sigma_candidate"]
+                sigma = best.get("sigma")
+                if sigma is None:
+                    sigma = float(best["d_pf"]) - float(best["d_lif"])
+                print(
+                    " No reaction accepted. "
+                    f"Best sigma candidate: Li={best['li_idx']}, "
+                    f"F={best['leave_F']}, "
+                    f"d_LiF={best['d_lif']:.3f}, "
+                    f"d_PF={best['d_pf']:.3f}, "
+                    f"sigma={float(sigma):.3f}"
                 )
             elif "closest" in info:
                 closest = info["closest"]
+                sigma = closest.get("sigma")
+                if sigma is None:
+                    sigma = float(closest["d_pf"]) - float(closest["d_lif"])
                 print(
-                    " No valid reaction candidate. "
-                    f"Closest Li-F: Li={closest['li_idx']}, "
+                    " No reaction accepted. "
+                    f"Diagnostic candidate: Li={closest['li_idx']}, "
                     f"F={closest['leave_F']}, "
                     f"d_LiF={closest['d_lif']:.3f}, "
-                    f"d_PF={closest['d_pf']:.3f}"
+                    f"d_PF={closest['d_pf']:.3f}, "
+                    f"sigma={float(sigma):.3f}"
                 )
 
     print("Done.")
