@@ -86,7 +86,7 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
     return float(np.linalg.norm(dr))
 
 
-def reaction_coordinate_sigma(d_pf: float, d_lif: float) -> float:
+def reaction_coordinate(d_pf: float, d_lif: float) -> float:
     """
     Reaction coordinate for LiPF6 -> LiF + PF5.
 
@@ -197,7 +197,7 @@ def find_sigma_candidates(
                 )
 
     candidates.sort(
-        key=lambda c: reaction_coordinate_sigma(d_pf=c.d_pf, d_lif=c.d_lif),
+        key=lambda c: reaction_coordinate(d_pf=c.d_pf, d_lif=c.d_lif),
         reverse=True,
     )
     return candidates
@@ -216,7 +216,7 @@ def candidate_records_from_sigma_candidates(
     """
     records = []
     for rank, cand in enumerate(candidates[: int(top_n)]):
-        sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
         records.append(
             {
                 "rank": int(rank),
@@ -497,7 +497,7 @@ def maybe_react_one_event(
         }, R
 
     cand = candidates[0]
-    sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+    sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
     proposal_factor = sigma_gate_factor(
         sigma=sigma,
         midpoint=sigma_mid,
@@ -517,7 +517,7 @@ def maybe_react_one_event(
               "leave_F": cand.leave_F,
               "d_lif": cand.d_lif,
               "d_pf": cand.d_pf,
-              "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
+              "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
             },
             "proposal_factor": proposal_factor,
             "u_proposal": u_prop,
@@ -590,7 +590,7 @@ def maybe_react_one_event(
         "leave_F": cand.leave_F,
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
-        "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
+        "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
     }
 
     if not accepted:
@@ -696,7 +696,7 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
         p_react, k_eff, pf_factor = reaction_probability_from_sigma(
             sigma=sigma,
             base_rate_ps=base_rate_ps,
@@ -767,7 +767,7 @@ def maybe_react_rate_events(
                  "leave_F": cand.leave_F,
                  "d_lif": cand.d_lif,
                  "d_pf": cand.d_pf,
-                 "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
+                 "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
                  "p_rate": p_react,
                  "k_rate_ps": base_rate_ps,
                  "k_eff_ps": k_eff,
