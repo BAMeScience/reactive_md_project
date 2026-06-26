@@ -281,8 +281,6 @@ def main(cfg: SimConfig):
             li_type=cfg.li_type,
             r_pf_probe=cfg.r_pf_probe,
             beta=beta,
-            sigma_mid=cfg.sigma_mid,
-            sigma_width=cfg.sigma_width,
             mc_energy_evaluator=mc_energy_evaluator,
             candidate_log_top_n=cfg.candidate_log_top_n,
         )

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import jax
@@ -11,10 +11,11 @@ from jax_md.minimize import fire_descent
 
 from .reactions.templates_pf5 import PF5Template, LiFTemplate
 from .reactions.lipf6 import embed_pf5_into_pf6
-from .topology_opls import  remove_terms_in_molid
+from .topology_opls import remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
-### constants to compute rate constant from activation energy in eV
+
+# Constants to compute rate constants from activation energies in eV.
 K_B_SI = 1.380649e-23
 H_SI = 6.62607015e-34
 K_B_EV = 8.617333262145e-5
@@ -26,6 +27,7 @@ def tst_rate_ps(
     activation_energy_eV: float,
     prefactor_ps: float | None = None,
 ) -> float:
+    """Transition-state-theory rate in ps^-1 from an activation energy."""
     if prefactor_ps is None:
         prefactor_ps = (K_B_SI * temperature_k / H_SI) * 1.0e-12
 
@@ -42,6 +44,7 @@ def resolve_rate_ps(
     temperature_k: float,
     prefactor_ps: float | None = None,
 ) -> float:
+    """Resolve either an explicitly supplied rate or a TST-derived rate."""
     if reaction_rate_ps is not None and activation_energy_eV is not None:
         raise ValueError(
             "Specify either reaction_rate_ps or activation_energy_eV, not both."
@@ -59,6 +62,7 @@ def resolve_rate_ps(
 
     return 0.0
 
+
 @dataclass
 class SystemState:
     bonds: tuple
@@ -74,6 +78,8 @@ class SystemState:
 
 @dataclass(frozen=True)
 class ReactionCandidate:
+    """One possible PF6 -> PF5 + Li/F reaction event."""
+
     k_pf6: int
     li_idx: int
     leave_F: int
@@ -86,14 +92,13 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
     return float(np.linalg.norm(dr))
 
 
-def reaction_coordinate(d_pf: float, d_lif: float) -> float:
-    """
-    Reaction coordinate for LiPF6 -> LiF + PF5.
+def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
+    """Reaction coordinate for LiPF6 -> LiF + PF5.
 
-    sigma = d(F-P) - d(Li-F)
+    sigma = d(P-F) - d(Li-F)
 
-    sigma < 0: F is more PF6-like
-    sigma > 0: F is more LiF-like
+    sigma < 0: F is more PF6-like.
+    sigma > 0: F is more LiF-like.
     """
     return float(d_pf - d_lif)
 
@@ -104,16 +109,11 @@ def reaction_probability(
     midpoint: float = 0.0,
     width: float = 0.2,
 ) -> float:
-    """
-    Smooth probability/rate factor derived only from the reaction coordinate sigma.
+    """Smooth sigma-dependent probability/rate factor for rate mode.
 
-    sigma = d(P-F) - d(Li-F)
-
-    sigma < midpoint: reactant-like, low reaction probability
-    sigma > midpoint: product-like, high reaction probability
-
-    The midpoint is the sigma value where the factor is 0.5.
-    The width controls how sharp the transition region is.
+    This function is intentionally used only in rate mode. In Metropolis mode,
+    sigma ranks/selects the trial candidate, while the Metropolis criterion uses
+    only Delta E and beta.
     """
     if width <= 0.0:
         raise ValueError("Sigma width must be positive.")
@@ -131,8 +131,7 @@ def rate_probability_from_reaction_coordinate(
     midpoint: float = 0.0,
     width: float = 0.2,
 ) -> tuple[float, float, float]:
-    """
-    Convert the single coordinate sigma into an event probability.
+    """Convert sigma into a rate-mode event probability.
 
     Returns
     -------
@@ -153,23 +152,23 @@ def rate_probability_from_reaction_coordinate(
     return p_react, k_eff_ps, sigma_factor
 
 
-def find_sigma_candidates(
+def find_reaction_candidates(
     R,
     pf6_atoms_np: np.ndarray,
     li_atoms_np: np.ndarray,
     disp_fn,
     *,
     pf6_reacted_np: np.ndarray,
-):
-    """
-    Candidate pool for the corrected model.
+) -> list[ReactionCandidate]:
+    """Return all possible reaction candidates, ranked by sigma.
 
-    Every unreacted PF6 fluorine and every Li ion is a possible trial pair.
-    No independent Li-F or P-F cutoff is used. The only ordering variable is
-    sigma = d(P-F) - d(Li-F).
+    Every unreacted PF6 fluorine and every Li ion is considered. No independent
+    Li-F or P-F hard cutoff is used. The only ordering variable is
+
+        sigma = d(P-F) - d(Li-F)
     """
     Rj = jnp.asarray(R)
-    candidates = []
+    candidates: list[ReactionCandidate] = []
 
     for k in range(pf6_atoms_np.shape[0]):
         if pf6_reacted_np[k]:
@@ -203,17 +202,12 @@ def find_sigma_candidates(
     return candidates
 
 
-def candidate_records_from_sigma_candidates(
+def candidate_records_from_reaction_candidates(
     candidates: list[ReactionCandidate],
     *,
     top_n: int = 10,
 ) -> list[dict]:
-    """
-    Diagnostic table for logging sigma-ranked candidates.
-
-    This function does not decide reactivity. It only converts the already
-    sigma-ranked candidates into dictionaries for log output.
-    """
+    """Convert sigma-ranked candidates into dictionaries for logging."""
     records = []
     for rank, cand in enumerate(candidates[: int(top_n)]):
         sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
@@ -230,8 +224,19 @@ def candidate_records_from_sigma_candidates(
         )
     return records
 
-#make_probe_geometry:
-#moves the leaving F away from P before relaxation, so the new PF₅ topology does not start with the removed F still sitting inside the old PF₆ geometry.
+
+def _candidate_info(cand: ReactionCandidate) -> dict:
+    sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+    return {
+        "k_pf6": cand.k_pf6,
+        "li_idx": cand.li_idx,
+        "leave_F": cand.leave_F,
+        "d_lif": cand.d_lif,
+        "d_pf": cand.d_pf,
+        "sigma": sigma,
+    }
+
+
 def make_probe_geometry(
     R,
     *,
@@ -241,6 +246,10 @@ def make_probe_geometry(
     shift_fn,
     r_pf_probe: float = 4.0,
 ):
+    """Move the leaving F away from P before product-side relaxation.
+
+    This is a geometry preparation step, not a reaction criterion.
+    """
     rP = R[P_atom]
     rF = R[leave_F]
 
@@ -471,22 +480,27 @@ def maybe_react_one_event(
     beta: float,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
-    sigma_mid: float = 0.0,
-    sigma_width: float = 0.2,
-):    
+):
+    """Attempt one Metropolis reaction event.
+
+    In Metropolis mode, sigma is used only to rank/select the reaction
+    candidate. There is no separate sigma-dependent proposal probability. The
+    stochastic acceptance step is solely the Metropolis criterion based on
+    Delta E and beta.
+    """
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidates = find_sigma_candidates(
+    candidates = find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
         pf6_reacted_np=pf6_reacted_np,
     )
-    candidate_records = candidate_records_from_sigma_candidates(
+    candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
     )
@@ -494,36 +508,12 @@ def maybe_react_one_event(
     if not candidates:
         return key, False, ff, sys, {
             "mode": "metropolis",
+            "reason": "no_candidates",
             "candidate_records": candidate_records,
         }, R
 
     cand = candidates[0]
-    sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
-    proposal_factor = reaction_probability(
-        sigma,
-        midpoint=sigma_mid,
-        width=sigma_width,
-    )
-    proposal_factor = float(np.clip(proposal_factor, 0.0, 1.0))
-
-    key, sub = jax.random.split(key)
-    u_prop = float(jax.random.uniform(sub))
-
-    if u_prop >= proposal_factor:
-       return key, False, ff, sys, {
-            "mode": "metropolis",
-            "candidate": {
-              "k_pf6": cand.k_pf6,
-              "li_idx": cand.li_idx,
-              "leave_F": cand.leave_F,
-              "d_lif": cand.d_lif,
-              "d_pf": cand.d_pf,
-              "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
-            },
-            "proposal_factor": proposal_factor,
-            "u_proposal": u_prop,
-            "candidate_records": candidate_records,
-       }, R
+    candidate_info = _candidate_info(cand)
 
     if mc_energy_evaluator is None:
         nlist_before = ff.neighbor_fn.update(R, ff.nlist)
@@ -549,6 +539,7 @@ def maybe_react_one_event(
         return key, False, ff, sys, {
             "mode": "metropolis",
             "reason": "type_sanity_failed",
+            "candidate": candidate_info,
             "candidate_records": candidate_records,
         }, R
 
@@ -585,34 +576,22 @@ def maybe_react_one_event(
     dE = E_after - E_before
     key, accepted, p_acc = accept_reject(key, dE, beta)
 
-    candidate_info = {
-        "k_pf6": cand.k_pf6,
-        "li_idx": cand.li_idx,
-        "leave_F": cand.leave_F,
-        "d_lif": cand.d_lif,
-        "d_pf": cand.d_pf,
-        "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
-    }
-
-    if not accepted:
-        return key, False, ff, sys, {
-            "mode": "metropolis",
-            "candidate": candidate_info,
-            "dE": dE,
-            "p_acc": p_acc,
-            "candidate_records": candidate_records,
-        }, R
-
-    pf6_reacted_np[cand.k_pf6] = True
-    sys_new = make_system_state_from_trial(trial, pf6_reacted_np)
-
-    return key, True, ff_trial, sys_new, {
+    info = {
         "mode": "metropolis",
-        "accepted_event": candidate_info,
+        "candidate": candidate_info,
         "dE": dE,
         "p_acc": p_acc,
         "candidate_records": candidate_records,
-    }, R_relaxed
+    }
+
+    if not accepted:
+        return key, False, ff, sys, info, R
+
+    pf6_reacted_np[cand.k_pf6] = True
+    sys_new = make_system_state_from_trial(trial, pf6_reacted_np)
+    info["accepted_event"] = candidate_info
+
+    return key, True, ff_trial, sys_new, info, R_relaxed
 
 
 def maybe_react_rate_events(
@@ -640,28 +619,33 @@ def maybe_react_rate_events(
     max_reactions_per_check: int = 1,
     candidate_log_top_n: int = 10,
     sigma_mid: float = 0.0,
-    sigma_width: float = 0.2
+    sigma_width: float = 0.2,
 ):
+    """Attempt rate-based reactions.
+
+    In rate mode, sigma contributes to the effective rate via
+    reaction_probability().
+    """
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
     base_rate_ps = resolve_rate_ps(
-     reaction_rate_ps=reaction_rate_ps,
-     activation_energy_eV=activation_energy_eV,
-     temperature_k=temperature_k,
-     prefactor_ps=prefactor_ps,
+        reaction_rate_ps=reaction_rate_ps,
+        activation_energy_eV=activation_energy_eV,
+        temperature_k=temperature_k,
+        prefactor_ps=prefactor_ps,
     )
 
-    candidates = find_sigma_candidates(
+    candidates = find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
         pf6_reacted_np=pf6_reacted_np,
     )
-    candidate_records = candidate_records_from_sigma_candidates(
+    candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
     )
@@ -761,23 +745,19 @@ def maybe_react_rate_events(
         ff_current.nlist = ff_current.neighbor_fn.allocate(R_relaxed)
         R_current = R_relaxed
 
-        accepted_events.append(
+        event_info = _candidate_info(cand)
+        event_info.update(
             {
-                 "k_pf6": cand.k_pf6,
-                 "li_idx": cand.li_idx,
-                 "leave_F": cand.leave_F,
-                 "d_lif": cand.d_lif,
-                 "d_pf": cand.d_pf,
-                 "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
-                 "p_rate": p_react,
-                 "k_rate_ps": base_rate_ps,
-                 "k_eff_ps": k_eff,
-                 "pf_rate_factor": pf_factor,
-                 "dt_reactive_ps": reactive_interval_ps,
-                 "sigma_mid": sigma_mid,
-                 "sigma_width": sigma_width,
+                "p_rate": p_react,
+                "k_rate_ps": base_rate_ps,
+                "k_eff_ps": k_eff,
+                "pf_rate_factor": pf_factor,
+                "dt_reactive_ps": reactive_interval_ps,
+                "sigma_mid": sigma_mid,
+                "sigma_width": sigma_width,
             }
         )
+        accepted_events.append(event_info)
 
     if not accepted_events:
         return key, False, ff, sys, {
@@ -861,3 +841,4 @@ def fire_relax_with_nlist(
 
     fire_state.position.block_until_ready()
     return fire_state.position, nlist
+

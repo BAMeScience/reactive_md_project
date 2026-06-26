@@ -22,8 +22,8 @@ class SimConfig:
     # sigma = d(P-F) - d(Li-F)
     # sigma_mid is the midpoint of the sigmoid reaction probability.
     # sigma_width controls how sharp the transition region is.
-    sigma_mid: float = 0.0
-    sigma_width: float = 0.2
+    sigma_mid: float = 0.0 # needed for rate mode
+    sigma_width: float = 0.2 #needed for rate mode
 
     # Reaction mode and kinetics
     reaction_mode: str = "metropolis"
