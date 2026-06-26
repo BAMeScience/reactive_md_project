@@ -98,131 +98,75 @@ def reaction_coordinate_sigma(d_pf: float, d_lif: float) -> float:
     return float(d_pf - d_lif)
 
 
-def smooth_gate_factor(
+def sigma_gate_factor(
     *,
-    d_pf: float,
-    d_lif: float,
-    mode: str,
-    coordinate: str = "sigma",
-    r_pf_break: float,
-    midpoint: float,
-    width: float,
+    sigma: float,
+    midpoint: float = 0.0,
+    width: float = 0.2,
 ) -> float:
     """
-    Smooth geometric gate.
+    Smooth probability/rate factor derived only from the reaction coordinate sigma.
 
-    coordinate="pf_distance":
-        x = d(P-F)
+    sigma = d(P-F) - d(Li-F)
 
-    coordinate="sigma":
-        x = d(P-F) - d(Li-F)
+    sigma < midpoint: reactant-like, low reaction probability
+    sigma > midpoint: product-like, high reaction probability
 
-    mode="hard":
-        returns 0 or 1
-
-    mode="sigmoid":
-        returns smooth value between 0 and 1
+    The midpoint is the sigma value where the factor is 0.5.
+    The width controls how sharp the transition region is.
     """
+    if width <= 0.0:
+        raise ValueError("Sigma width must be positive.")
 
-    if coordinate == "pf_distance":
-        x = float(d_pf)
-        hard_threshold = float(r_pf_break)
-
-    elif coordinate == "sigma":
-        x = reaction_coordinate_sigma(d_pf=d_pf, d_lif=d_lif)
-        hard_threshold = float(midpoint)
-
-    else:
-        raise ValueError(f"Unknown reaction coordinate: {coordinate!r}")
-
-    if mode == "hard":
-        return 1.0 if x > hard_threshold else 0.0
-
-    if mode == "sigmoid":
-        if width <= 0.0:
-            raise ValueError("Gate width must be positive for sigmoid mode.")
-        return float(1.0 / (1.0 + np.exp(-(x - midpoint) / width)))
-
-    raise ValueError(f"Unknown gate mode: {mode!r}")
+    z = (float(sigma) - float(midpoint)) / float(width)
+    z = float(np.clip(z, -700.0, 700.0))
+    return float(1.0 / (1.0 + np.exp(-z)))
 
 
-def find_near_miss_candidates(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
+def reaction_probability_from_sigma(
     *,
-    r_lif_on: float,
-    r_pf_break: float,
-    pf6_reacted_np: np.ndarray,
-    top_n: int = 10,
-):
-    Rj = jnp.asarray(R)
-    records = []
+    sigma: float,
+    base_rate_ps: float,
+    reactive_interval_ps: float,
+    midpoint: float = 0.0,
+    width: float = 0.2,
+) -> tuple[float, float, float]:
+    """
+    Convert the single coordinate sigma into an event probability.
 
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                passes_lif = d_lif < r_lif_on
-                passes_pf = d_pf > r_pf_break
-
-                records.append(
-                    {
-                        "k_pf6": int(k),
-                        "li_idx": li_idx,
-                        "leave_F": f_idx,
-                        "d_lif": float(d_lif),
-                        "d_pf": float(d_pf),
-                        "sigma": float(d_pf - d_lif),
-                        "q_pf_minus_lif": float(d_pf - d_lif),
-                        "passes_lif": int(passes_lif),
-                        "passes_pf": int(passes_pf),
-                        "passes_all": int(passes_lif and passes_pf),
-                    }
-                )
-
-    records.sort(
-        key=lambda x: (
-            1 - x["passes_all"],
-            x["d_lif"],
-            -x["d_pf"],
-        )
+    Returns
+    -------
+    p_react:
+        Probability for the reactive step during one reactive interval.
+    k_eff_ps:
+        Effective rate in ps^-1.
+    sigma_factor:
+        Dimensionless factor between 0 and 1.
+    """
+    sigma_factor = sigma_gate_factor(
+        sigma=sigma,
+        midpoint=midpoint,
+        width=width,
     )
-
-    records = records[: int(top_n)]
-
-    for i, rec in enumerate(records):
-        rec["rank"] = int(i)
-
-    return records
+    k_eff_ps = float(base_rate_ps) * sigma_factor
+    p_react = 1.0 - float(np.exp(-k_eff_ps * float(reactive_interval_ps)))
+    return p_react, k_eff_ps, sigma_factor
 
 
-def find_lif_contact_candidates(
+def find_sigma_candidates(
     R,
     pf6_atoms_np: np.ndarray,
     li_atoms_np: np.ndarray,
     disp_fn,
     *,
-    r_lif_on: float,
     pf6_reacted_np: np.ndarray,
 ):
     """
-    Rate-mode candidate pool.
+    Candidate pool for the corrected model.
 
-    This intentionally uses only the Li-F contact gate. The P-F geometry enters
-    later through a smooth rate factor, not as a hard candidate filter.
+    Every unreacted PF6 fluorine and every Li ion is a possible trial pair.
+    No independent Li-F or P-F cutoff is used. The only ordering variable is
+    sigma = d(P-F) - d(Li-F).
     """
     Rj = jnp.asarray(R)
     candidates = []
@@ -240,9 +184,6 @@ def find_lif_contact_candidates(
                 f_idx = int(f)
 
                 d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                if d_lif >= r_lif_on:
-                    continue
-
                 d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
 
                 candidates.append(
@@ -255,121 +196,41 @@ def find_lif_contact_candidates(
                     )
                 )
 
-    candidates.sort(key=lambda c: (c.d_lif, -c.d_pf))
-    return candidates
-
-
-def find_all_candidates(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
-    *,
-    r_lif_on: float,
-    r_pf_break: float,
-    pf6_reacted_np: np.ndarray,
-):
-    """
-    Hard-gated candidate finder used by Metropolis mode.
-    """
-    Rj = jnp.asarray(R)
-    candidates = []
-
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                if d_lif < r_lif_on and d_pf > r_pf_break:
-                    candidates.append(
-                        Candidate(
-                            k_pf6=int(k),
-                            li_idx=li_idx,
-                            leave_F=f_idx,
-                            d_lif=float(d_lif),
-                            d_pf=float(d_pf),
-                        )
-                    )
-
-    candidates.sort(key=lambda c: (c.d_lif, -c.d_pf))
-    return candidates
-
-
-def find_best_candidate(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
-    *,
-    r_lif_on: float,
-    r_pf_break: float,
-    pf6_reacted_np: np.ndarray,
-) -> Optional[Candidate]:
-    candidates = find_all_candidates(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        disp_fn,
-        r_lif_on=r_lif_on,
-        r_pf_break=r_pf_break,
-        pf6_reacted_np=pf6_reacted_np,
+    candidates.sort(
+        key=lambda c: reaction_coordinate_sigma(d_pf=c.d_pf, d_lif=c.d_lif),
+        reverse=True,
     )
-    if not candidates:
-        return None
-    return candidates[0]
+    return candidates
 
 
-def find_closest_lif_pair(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
+def candidate_records_from_sigma_candidates(
+    candidates: list[Candidate],
     *,
-    pf6_reacted_np: np.ndarray,
-) -> Optional[Candidate]:
-    Rj = jnp.asarray(R)
+    top_n: int = 10,
+) -> list[dict]:
+    """
+    Diagnostic table for logging sigma-ranked candidates.
 
-    best: Optional[Candidate] = None
-    best_d = 1.0e30
+    This function does not decide reactivity. It only converts the already
+    sigma-ranked candidates into dictionaries for log output.
+    """
+    records = []
+    for rank, cand in enumerate(candidates[: int(top_n)]):
+        sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        records.append(
+            {
+                "rank": int(rank),
+                "k_pf6": cand.k_pf6,
+                "li_idx": cand.li_idx,
+                "leave_F": cand.leave_F,
+                "d_lif": cand.d_lif,
+                "d_pf": cand.d_pf,
+                "sigma": sigma,
+            }
+        )
+    return records
 
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                if d_lif < best_d:
-                    best_d = d_lif
-                    best = Candidate(
-                        k_pf6=int(k),
-                        li_idx=li_idx,
-                        leave_F=f_idx,
-                        d_lif=float(d_lif),
-                        d_pf=float(d_pf),
-                    )
-
-    return best
-
-
+#probe geometry: moves the leaving F away from P before relaxation, so the new PF₅ topology does not start with the removed F still sitting inside the old PF₆ geometry.
 def make_probe_geometry(
     R,
     *,
@@ -605,80 +466,43 @@ def maybe_react_one_event(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_lif_on: float,
-    r_pf_break: float,
     r_pf_probe: float,
     beta: float,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
-    thermo_gate_mode: str = "sigmoid",
-    thermo_gate_coordinate: str = "sigma",
-    thermo_gate_mid: float = 0.0,
-    thermo_gate_width: float = 0.2,
+    sigma_mid: float = 0.0,
+    sigma_width: float = 0.2,
 ):    
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidate_records = find_near_miss_candidates(
+    candidates = find_sigma_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
-        r_lif_on=r_lif_on,
-        r_pf_break=r_pf_break,
         pf6_reacted_np=pf6_reacted_np,
+    )
+    candidate_records = candidate_records_from_sigma_candidates(
+        candidates,
         top_n=candidate_log_top_n,
     )
 
-    cand = find_best_candidate(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        ff.disp_fn,
-        r_lif_on=r_lif_on,
-        r_pf_break=r_pf_break,
-        pf6_reacted_np=pf6_reacted_np,
-    )
-
-    if cand is None:
-        closest = find_closest_lif_pair(
-            R,
-            pf6_atoms_np,
-            li_atoms_np,
-            ff.disp_fn,
-            pf6_reacted_np=pf6_reacted_np,
-        )
-
-        info = {
+    if not candidates:
+        return key, False, ff, sys, {
             "mode": "metropolis",
             "candidate_records": candidate_records,
-        }
+        }, R
 
-        if closest is not None:
-            info["closest"] = {
-                "k_pf6": closest.k_pf6,
-                "li_idx": closest.li_idx,
-                "leave_F": closest.leave_F,
-                "d_lif": closest.d_lif,
-                "d_pf": closest.d_pf,
-            }
-
-        return key, False, ff, sys, info, R
-
-
-    proposal_factor = smooth_gate_factor(
-    d_pf=cand.d_pf,
-    d_lif=cand.d_lif,
-    mode=thermo_gate_mode,
-    coordinate=thermo_gate_coordinate,
-    r_pf_break=r_pf_break,
-    midpoint=thermo_gate_mid,
-    width=thermo_gate_width,
+    cand = candidates[0]
+    sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+    proposal_factor = sigma_gate_factor(
+        sigma=sigma,
+        midpoint=sigma_mid,
+        width=sigma_width,
     )
-
-    #guard against exavt 0 -> increase numerical robustness
     proposal_factor = float(np.clip(proposal_factor, 0.0, 1.0))
 
     key, sub = jax.random.split(key)
@@ -693,7 +517,7 @@ def maybe_react_one_event(
               "leave_F": cand.leave_F,
               "d_lif": cand.d_lif,
               "d_pf": cand.d_pf,
-              "sigma": cand.d_pf - cand.d_lif,
+              "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
             },
             "proposal_factor": proposal_factor,
             "u_proposal": u_prop,
@@ -766,6 +590,7 @@ def maybe_react_one_event(
         "leave_F": cand.leave_F,
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
+        "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
     }
 
     if not accepted:
@@ -805,8 +630,6 @@ def maybe_react_rate_events(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_lif_on: float,
-    r_pf_break: float,
     r_pf_probe: float,
     reaction_rate_ps: float | None,
     activation_energy_eV: float | None,
@@ -815,10 +638,8 @@ def maybe_react_rate_events(
     reactive_interval_ps: float,
     max_reactions_per_check: int = 1,
     candidate_log_top_n: int = 10,
-    rate_pf_mode: str = "sigmoid",
-    rate_pf_mid: float = 0.0,
-    rate_pf_width: float = 0.2,
-    rate_gate_coordinate: str = "sigma"
+    sigma_mid: float = 0.0,
+    sigma_width: float = 0.2
 ):
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
@@ -832,40 +653,23 @@ def maybe_react_rate_events(
      prefactor_ps=prefactor_ps,
     )
 
-    candidate_records = find_near_miss_candidates(
+    candidates = find_sigma_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
         ff.disp_fn,
-        r_lif_on=r_lif_on,
-        r_pf_break=r_pf_break,
         pf6_reacted_np=pf6_reacted_np,
+    )
+    candidate_records = candidate_records_from_sigma_candidates(
+        candidates,
         top_n=candidate_log_top_n,
     )
 
-    candidates = find_lif_contact_candidates(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        ff.disp_fn,
-        r_lif_on=r_lif_on,
-        pf6_reacted_np=pf6_reacted_np,
-    )
-
     if not candidates:
-        closest = find_closest_lif_pair(
-            R,
-            pf6_atoms_np,
-            li_atoms_np,
-            ff.disp_fn,
-            pf6_reacted_np=pf6_reacted_np,
-        )
-
-        info = {
+        return key, False, ff, sys, {
             "mode": "rate",
-            "rate_pf_mode": rate_pf_mode,
-            "rate_pf_mid": rate_pf_mid,
-            "rate_pf_width": rate_pf_width,
+            "sigma_mid": sigma_mid,
+            "sigma_width": sigma_width,
             "n_candidates": 0,
             "n_accepted_this_check": 0,
             "p_rate": 0.0,
@@ -874,18 +678,7 @@ def maybe_react_rate_events(
             "pf_rate_factor": 0.0,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
-        }
-
-        if closest is not None:
-            info["closest"] = {
-                "k_pf6": closest.k_pf6,
-                "li_idx": closest.li_idx,
-                "leave_F": closest.leave_F,
-                "d_lif": closest.d_lif,
-                "d_pf": closest.d_pf,
-            }
-
-        return key, False, ff, sys, info, R
+        }, R
 
     accepted_events = []
     R_current = R
@@ -903,18 +696,14 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        pf_factor = smooth_gate_factor(
-          d_pf=cand.d_pf,
-          d_lif=cand.d_lif,
-          mode=rate_pf_mode,
-          coordinate=rate_gate_coordinate,
-          r_pf_break=r_pf_break,
-          midpoint=rate_pf_mid,
-          width=rate_pf_width,
+        sigma = reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        p_react, k_eff, pf_factor = reaction_probability_from_sigma(
+            sigma=sigma,
+            base_rate_ps=base_rate_ps,
+            reactive_interval_ps=reactive_interval_ps,
+            midpoint=sigma_mid,
+            width=sigma_width,
         )
-
-        k_eff = base_rate_ps * pf_factor
-        p_react = 1.0 - float(np.exp(-k_eff * reactive_interval_ps))
 
         last_p_rate = p_react
         last_k_eff = k_eff
@@ -978,23 +767,22 @@ def maybe_react_rate_events(
                  "leave_F": cand.leave_F,
                  "d_lif": cand.d_lif,
                  "d_pf": cand.d_pf,
-                 "sigma": cand.d_pf - cand.d_lif,
+                 "sigma": reaction_coordinate_sigma(d_pf=cand.d_pf, d_lif=cand.d_lif),
                  "p_rate": p_react,
                  "k_rate_ps": base_rate_ps,
                  "k_eff_ps": k_eff,
                  "pf_rate_factor": pf_factor,
                  "dt_reactive_ps": reactive_interval_ps,
-                 "rate_pf_mode": rate_pf_mode,
-                 "rate_gate_coordinate": rate_gate_coordinate,
+                 "sigma_mid": sigma_mid,
+                 "sigma_width": sigma_width,
             }
         )
 
     if not accepted_events:
         return key, False, ff, sys, {
             "mode": "rate",
-            "rate_pf_mode": rate_pf_mode,
-            "rate_pf_mid": rate_pf_mid,
-            "rate_pf_width": rate_pf_width,
+            "sigma_mid": sigma_mid,
+            "sigma_width": sigma_width,
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
             "p_rate": last_p_rate,
@@ -1009,9 +797,8 @@ def maybe_react_rate_events(
 
     return key, True, ff_current, sys_current, {
         "mode": "rate",
-        "rate_pf_mode": rate_pf_mode,
-        "rate_pf_mid": rate_pf_mid,
-        "rate_pf_width": rate_pf_width,
+        "sigma_mid": sigma_mid,
+        "sigma_width": sigma_width,
         "accepted_events": accepted_events,
         "accepted_event": first_event,
         "n_candidates": len(candidates),
