@@ -363,9 +363,44 @@ tests/
 If you use this software in academic work, please cite:
 
 - JAX-MD
+```
+ @inproceedings{jaxmd2020,
+  author = {Schoenholz, Samuel S. and Cubuk, Ekin D.},
+  booktitle = {Advances in Neural Information Processing Systems},
+  publisher = {Curran Associates, Inc.},
+  title = {JAX M.D. A Framework for Differentiable Physics},
+  url = {https://papers.nips.cc/paper/2020/file/83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf},
+  volume = {33},
+  year = {2020}
+ }
+```
+
 - MACE / MACE-JAX, if used
+ https://github.com/ACEsuit/mace-jax
+ ```bibtex
+@inproceedings{Batatia2022mace,
+  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},
+  author={Ilyes Batatia and David Peter Kovacs and Gregor N. C. Simm and Christoph Ortner and Gabor Csanyi},
+  booktitle={Advances in Neural Information Processing Systems},
+  editor={Alice H. Oh and Alekh Agarwal and Danielle Belgrave and Kyunghyun Cho},
+  year={2022},
+  url={https://openreview.net/forum?id=YPpSngE-ZU}
+}
+
+@misc{Batatia2022Design,
+  title = {The Design Space of E(3)-Equivariant Atom-Centered Interatomic Potentials},
+  author = {Batatia, Ilyes and Batzner, Simon and Kov{\'a}cs, D{\'a}vid P{\'e}ter and Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and Ortner, Christoph and Kozinsky, Boris and Cs{\'a}nyi, G{\'a}bor},
+  year = {2022},
+  number = {arXiv:2205.06643},
+  eprint = {2205.06643},
+  eprinttype = {arxiv},
+  doi = {10.48550/arXiv.2205.06643},
+  archiveprefix = {arXiv}
+ } 
+```
+  
 - The original rs@MD methodology by Heuer and co-workers, J. Chem. Theory Comput. 2021, 17, 1074-1085
-- The ab initio work motivating the LiPF6 reaction coordinate, if used in your study
+- The ab initio work motivating the LiPF6 reaction coordinate, Journal of The Electrochemical Society, 2024 171 080505
 
 ---
 
