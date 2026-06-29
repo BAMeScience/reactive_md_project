@@ -10,7 +10,6 @@ from reactive_md.reaction import (
 
 
 def test_reaction_coordinate_sign_convention():
-    # sigma = d(P-F) - d(Li-F)
     assert reaction_coordinate(d_pf=1.6, d_lif=2.4) == pytest.approx(-0.8)
     assert reaction_coordinate(d_pf=2.4, d_lif=1.6) == pytest.approx(0.8)
 
@@ -34,13 +33,12 @@ def test_reaction_probability_monotonic_in_sigma():
 def test_reaction_probability_rejects_nonpositive_width():
     with pytest.raises(ValueError):
         reaction_probability(0.0, width=0.0)
-
     with pytest.raises(ValueError):
         reaction_probability(0.0, width=-1.0)
 
 
 def test_rate_probability_from_reaction_coordinate():
-    p = rate_probability_from_reaction_coordinate(
+    p_rate, k_eff, sigma_factor = rate_probability_from_reaction_coordinate(
         sigma=0.0,
         base_rate_ps=1.0,
         reactive_interval_ps=1.0,
@@ -48,12 +46,13 @@ def test_rate_probability_from_reaction_coordinate():
         width=0.2,
     )
 
-    expected = 1.0 - math.exp(-0.5)
-    assert p == pytest.approx(expected)
+    assert p_rate == pytest.approx(1.0 - math.exp(-0.5))
+    assert k_eff == pytest.approx(0.5)
+    assert sigma_factor == pytest.approx(0.5)
 
 
 def test_rate_probability_is_zero_for_zero_base_rate():
-    p = rate_probability_from_reaction_coordinate(
+    p_rate, k_eff, sigma_factor = rate_probability_from_reaction_coordinate(
         sigma=10.0,
         base_rate_ps=0.0,
         reactive_interval_ps=1.0,
@@ -61,5 +60,7 @@ def test_rate_probability_is_zero_for_zero_base_rate():
         width=0.2,
     )
 
-    assert p == pytest.approx(0.0)
+    assert p_rate == pytest.approx(0.0)
+    assert k_eff == pytest.approx(0.0)
+    assert sigma_factor == pytest.approx(1.0)
 

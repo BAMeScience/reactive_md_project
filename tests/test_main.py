@@ -33,56 +33,36 @@ def _empty_dihedrals():
 
 
 def _fake_parse_lammps_data(data_file, settings_file):
-    """Minimal parser output with one PF6 unit and one Li atom.
-
-    Atom layout:
-        0      P
-        1..6   F
-        7      Li
-    """
-
     positions = np.array(
         [
-            [0.0, 0.0, 0.0],  # P
-            [1.6, 0.0, 0.0],  # F
+            [0.0, 0.0, 0.0],
+            [1.6, 0.0, 0.0],
             [-1.6, 0.0, 0.0],
             [0.0, 1.6, 0.0],
             [0.0, -1.6, 0.0],
             [0.0, 0.0, 1.6],
             [0.0, 0.0, -1.6],
-            [3.0, 0.0, 0.0],  # Li
+            [3.0, 0.0, 0.0],
         ],
         dtype=np.float32,
     )
-
-    bonds = _empty_bonds()
-    angles = _empty_angles()
-    torsions = _empty_dihedrals()
-    impropers = _empty_dihedrals()
 
     charges = np.zeros((8,), dtype=np.float32)
     sigmas = np.full((8,), 3.0, dtype=np.float32)
     epsilons = np.full((8,), 0.1, dtype=np.float32)
     nonbonded = (charges, sigmas, epsilons, None, None)
 
-    molecule_id = np.array([1, 1, 1, 1, 1, 1, 1, 2], dtype=np.int32)
-    box = jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32)
-    masses = np.ones((8,), dtype=np.float32)
-
-    # Match default SimConfig: p_type=6, f_type=7, li_type=8.
-    atom_types = np.array([6, 7, 7, 7, 7, 7, 7, 8], dtype=np.int32)
-
     return (
         positions,
-        bonds,
-        angles,
-        torsions,
-        impropers,
+        _empty_bonds(),
+        _empty_angles(),
+        _empty_dihedrals(),
+        _empty_dihedrals(),
         nonbonded,
-        molecule_id,
-        box,
-        masses,
-        atom_types,
+        np.array([1, 1, 1, 1, 1, 1, 1, 2], dtype=np.int32),
+        jnp.array([20.0, 20.0, 20.0], dtype=jnp.float32),
+        np.ones((8,), dtype=np.float32),
+        np.array([6, 7, 7, 7, 7, 7, 7, 8], dtype=np.int32),
     )
 
 
@@ -108,22 +88,17 @@ def _fake_build_forcefield(**kwargs):
 
 
 def test_main_smoke_with_mocked_parser(monkeypatch):
-    """main() should still run with mocked I/O and no MD production work."""
-
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
 
     captured = {}
 
-    def fake_run_md_nvt_with_reactions(**kwargs):
+    def fake_run_md_nvt_with_reactions(key, **kwargs):
+        captured["driver_key"] = key
         captured["run_kwargs"] = kwargs
         return types.SimpleNamespace(accepted_events=0)
 
     monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
-    monkeypatch.setattr(
-        main_mod,
-        "run_md_nvt_with_reactions",
-        fake_run_md_nvt_with_reactions,
-    )
+    monkeypatch.setattr(main_mod, "run_md_nvt_with_reactions", fake_run_md_nvt_with_reactions)
 
     cfg = SimConfig(
         data_file="dummy.data",
@@ -142,11 +117,7 @@ def test_main_smoke_with_mocked_parser(monkeypatch):
     assert callable(captured["run_kwargs"]["reaction_step_fn"])
 
 
-def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
-    monkeypatch,
-):
-    """Metropolis mode uses sigma only for ranking; no sigma probability is passed."""
-
+def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(monkeypatch):
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
 
     captured = {}
@@ -155,20 +126,15 @@ def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
         captured["metropolis_kwargs"] = kwargs
         return args[0], False, kwargs["ff"], kwargs["sys"], {"mode": "metropolis"}, args[1]
 
-    def fake_run_md_nvt_with_reactions(**kwargs):
+    def fake_run_md_nvt_with_reactions(key, **kwargs):
         reaction_step_fn = kwargs["reaction_step_fn"]
-        key = jnp.array([0, 0], dtype=jnp.uint32)
         R = jnp.zeros((8, 3), dtype=jnp.float32)
         reaction_step_fn(key, R, kwargs["ff"], kwargs["sys"])
         return types.SimpleNamespace(accepted_events=0)
 
     monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
     monkeypatch.setattr(main_mod, "maybe_react_one_event", fake_maybe_react_one_event)
-    monkeypatch.setattr(
-        main_mod,
-        "run_md_nvt_with_reactions",
-        fake_run_md_nvt_with_reactions,
-    )
+    monkeypatch.setattr(main_mod, "run_md_nvt_with_reactions", fake_run_md_nvt_with_reactions)
 
     cfg = SimConfig(
         data_file="dummy.data",
@@ -181,13 +147,11 @@ def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
     main_mod.main(cfg)
 
     kwargs = captured["metropolis_kwargs"]
-
     assert kwargs["r_pf_probe"] == cfg.r_pf_probe
     assert "beta" in kwargs
     assert "mc_energy_evaluator" in kwargs
     assert "candidate_log_top_n" in kwargs
 
-    # Removed legacy / proposal-gate parameters.
     assert "sigma_mid" not in kwargs
     assert "sigma_width" not in kwargs
     assert "r_lif_on" not in kwargs
@@ -196,11 +160,7 @@ def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
     assert "thermo_gate_coordinate" not in kwargs
 
 
-def test_reaction_step_fn_rate_still_passes_sigma_probability_parameters(
-    monkeypatch,
-):
-    """Rate mode still uses sigma_mid/sigma_width for the sigma-dependent rate factor."""
-
+def test_reaction_step_fn_rate_still_passes_sigma_probability_parameters(monkeypatch):
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
 
     captured = {}
@@ -209,20 +169,15 @@ def test_reaction_step_fn_rate_still_passes_sigma_probability_parameters(
         captured["rate_kwargs"] = kwargs
         return args[0], False, kwargs["ff"], kwargs["sys"], {"mode": "rate"}, args[1]
 
-    def fake_run_md_nvt_with_reactions(**kwargs):
+    def fake_run_md_nvt_with_reactions(key, **kwargs):
         reaction_step_fn = kwargs["reaction_step_fn"]
-        key = jnp.array([0, 0], dtype=jnp.uint32)
         R = jnp.zeros((8, 3), dtype=jnp.float32)
         reaction_step_fn(key, R, kwargs["ff"], kwargs["sys"])
         return types.SimpleNamespace(accepted_events=0)
 
     monkeypatch.setattr(main_mod, "build_forcefield", _fake_build_forcefield)
     monkeypatch.setattr(main_mod, "maybe_react_rate_events", fake_maybe_react_rate_events)
-    monkeypatch.setattr(
-        main_mod,
-        "run_md_nvt_with_reactions",
-        fake_run_md_nvt_with_reactions,
-    )
+    monkeypatch.setattr(main_mod, "run_md_nvt_with_reactions", fake_run_md_nvt_with_reactions)
 
     cfg = SimConfig(
         data_file="dummy.data",
@@ -236,13 +191,11 @@ def test_reaction_step_fn_rate_still_passes_sigma_probability_parameters(
     main_mod.main(cfg)
 
     kwargs = captured["rate_kwargs"]
-
     assert kwargs["sigma_mid"] == -0.1
     assert kwargs["sigma_width"] == 0.15
     assert kwargs["reaction_rate_ps"] == 1.0
     assert kwargs["reactive_interval_ps"] == cfg.check_every * cfg.dt
 
-    # Removed legacy hard-gate / old rate-gate parameters.
     assert "r_lif_on" not in kwargs
     assert "r_pf_break" not in kwargs
     assert "rate_pf_mode" not in kwargs
