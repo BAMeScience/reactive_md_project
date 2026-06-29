@@ -2,7 +2,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from reactive_md.reaction import make_probe_geometry
+from reactive_md.reactions import make_probe_geometry
 
 
 def _disp(a, b):
