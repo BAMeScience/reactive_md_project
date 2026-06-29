@@ -117,7 +117,7 @@ def test_main_smoke_with_mocked_parser(monkeypatch):
     assert callable(captured["run_kwargs"]["reaction_step_fn"])
 
 
-def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(monkeypatch):
+def test_reaction_step_fn_metropolis_passes_sigma_probability_parameters(monkeypatch):
     monkeypatch.setattr(main_mod, "parse_lammps_data", _fake_parse_lammps_data)
 
     captured = {}
@@ -152,8 +152,8 @@ def test_reaction_step_fn_metropolis_does_not_pass_sigma_probability_parameters(
     assert "mc_energy_evaluator" in kwargs
     assert "candidate_log_top_n" in kwargs
 
-    assert "sigma_mid" not in kwargs
-    assert "sigma_width" not in kwargs
+    assert kwargs["sigma_mid"] == 0.25
+    assert kwargs["sigma_width"] == 0.05
     assert "r_lif_on" not in kwargs
     assert "r_pf_break" not in kwargs
     assert "thermo_gate_mode" not in kwargs

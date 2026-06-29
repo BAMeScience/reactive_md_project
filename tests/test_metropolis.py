@@ -6,42 +6,71 @@ import pytest
 from reactive_md.reaction import accept_reject
 
 
-def test_accept_reject_always_accepts_negative_energy_change():
+def test_accept_reject_combines_sigma_and_metropolis_factors():
     key = jax.random.PRNGKey(0)
 
-    _, accepted, p_acc = accept_reject(key, dE=-1.0, beta=1.0)
+    _, _accepted, p_total, p_sigma, p_metropolis = accept_reject(
+        key,
+        sigma=0.0,
+        dE=-1.0,
+        beta=1.0,
+        sigma_mid=0.0,
+        sigma_width=0.2,
+    )
 
-    assert accepted is True
-    assert p_acc == pytest.approx(1.0)
+    assert p_sigma == pytest.approx(0.5)
+    assert p_metropolis == pytest.approx(1.0)
+    assert p_total == pytest.approx(0.5)
 
 
-def test_accept_reject_probability_for_positive_energy_change():
+def test_accept_reject_positive_energy_uses_metropolis_factor():
     key = jax.random.PRNGKey(0)
 
-    _, _accepted, p_acc = accept_reject(key, dE=2.0, beta=0.5)
+    _, _accepted, p_total, p_sigma, p_metropolis = accept_reject(
+        key,
+        sigma=10.0,
+        dE=2.0,
+        beta=0.5,
+        sigma_mid=0.0,
+        sigma_width=0.2,
+    )
 
-    assert p_acc == pytest.approx(math.exp(-1.0))
+    assert p_sigma == pytest.approx(1.0)
+    assert p_metropolis == pytest.approx(math.exp(-1.0))
+    assert p_total == pytest.approx(math.exp(-1.0))
 
 
-def test_accept_reject_strongly_unfavorable_has_tiny_probability():
+def test_accept_reject_rejects_nonfinite_energy():
     key = jax.random.PRNGKey(0)
 
-    _, accepted, p_acc = accept_reject(key, dE=1000.0, beta=1.0)
+    _, accepted, p_total, p_sigma, p_metropolis = accept_reject(
+        key,
+        sigma=10.0,
+        dE=float("nan"),
+        beta=1.0,
+        sigma_mid=0.0,
+        sigma_width=0.2,
+    )
 
     assert accepted is False
-    assert p_acc == pytest.approx(0.0)
+    assert p_sigma == pytest.approx(1.0)
+    assert p_metropolis == pytest.approx(0.0)
+    assert p_total == pytest.approx(0.0)
 
 
-def test_metropolis_probability_does_not_depend_on_sigma():
-    # sigma is deliberately not an argument to accept_reject.
-    # This documents the intended split:
-    #   sigma ranks/selects candidates
-    #   dE and beta decide Metropolis acceptance
-    key = jax.random.PRNGKey(123)
+def test_accept_reject_sigma_can_suppress_downhill_reaction():
+    key = jax.random.PRNGKey(0)
 
-    _, accepted_a, p_a = accept_reject(key, dE=1.0, beta=2.0)
-    _, accepted_b, p_b = accept_reject(key, dE=1.0, beta=2.0)
+    _, _accepted, p_total, p_sigma, p_metropolis = accept_reject(
+        key,
+        sigma=-10.0,
+        dE=-100.0,
+        beta=1.0,
+        sigma_mid=0.0,
+        sigma_width=0.2,
+    )
 
-    assert p_a == p_b
-    assert accepted_a == accepted_b
+    assert p_sigma == pytest.approx(0.0)
+    assert p_metropolis == pytest.approx(1.0)
+    assert p_total == pytest.approx(0.0)
 
