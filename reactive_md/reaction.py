@@ -93,12 +93,15 @@ def _distance(disp_fn, Rj, i: int, j: int) -> float:
 
 
 def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
-    """Reaction coordinate for LiPF6 -> LiF + PF5.
 
-    sigma = d(P-F) - d(Li-F)
+    """
+    Reaction coordinate from Fattebert et al. Journal of The Electrochemical Society, 2024 171 080505 for LiPF6 decomposition.
 
-    sigma < 0: F is more PF6-like.
-    sigma > 0: F is more LiF-like.
+    σ = d(P–F) - d(Li–F)
+
+    σ < 0 : reactant-like configuration
+    σ ≈ 0 : transition region
+    σ > 0 : product-like configuration
     """
     return float(d_pf - d_lif)
 
