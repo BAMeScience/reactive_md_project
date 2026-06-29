@@ -72,9 +72,10 @@ def main(cfg: SimConfig):
     print(f"Discovered PF6 units: {pf6_atoms.shape[0]}")
     print(f"Discovered Li atoms:  {li_atoms.shape[0]}")
     print(
-        "Reaction gates: "
-        f"d_LiF < {cfg.r_lif_on:.3f} Å and "
-        f"d_PF > {cfg.r_pf_break:.3f} Å"
+        "Reaction coordinate: "
+        f"sigma = d(P-F) - d(Li-F); "
+        f"sigma_mid={cfg.sigma_mid:.3f} Å, "
+        f"sigma_width={cfg.sigma_width:.3f} Å"
     )
 
     print(f"Reaction mode: {cfg.reaction_mode}")
@@ -99,7 +100,7 @@ def main(cfg: SimConfig):
             print("Event log compression: gzip")
 
     if cfg.candidate_log_file is not None:
-        print(f"Writing candidate / near-miss log to: {cfg.candidate_log_file}")
+        print(f"Writing sigma candidate log to: {cfg.candidate_log_file}")
         print(f"Candidate log top N per check: {cfg.candidate_log_top_n}")
         if cfg.candidate_log_file.endswith(".gz"):
             print("Candidate log compression: gzip")
@@ -251,12 +252,9 @@ def main(cfg: SimConfig):
                 p_type=cfg.p_type,
                 f_type=cfg.f_type,
                 li_type=cfg.li_type,
-                r_lif_on=cfg.r_lif_on,
-                r_pf_break=cfg.r_pf_break,
                 r_pf_probe=cfg.r_pf_probe,
-                rate_pf_mode=cfg.rate_pf_mode,
-                rate_pf_mid=cfg.rate_pf_mid,
-                rate_pf_width=cfg.rate_pf_width,
+                sigma_mid=cfg.sigma_mid,
+                sigma_width=cfg.sigma_width,
                 reaction_rate_ps=cfg.reaction_rate_ps,
                 activation_energy_eV=cfg.activation_energy_eV,
                 temperature_k=cfg.temperature_k,
@@ -281,10 +279,10 @@ def main(cfg: SimConfig):
             p_type=cfg.p_type,
             f_type=cfg.f_type,
             li_type=cfg.li_type,
-            r_lif_on=cfg.r_lif_on,
-            r_pf_break=cfg.r_pf_break,
             r_pf_probe=cfg.r_pf_probe,
             beta=beta,
+            sigma_mid=cfg.sigma_mid,
+            sigma_width=cfg.sigma_width,
             mc_energy_evaluator=mc_energy_evaluator,
             candidate_log_top_n=cfg.candidate_log_top_n,
         )
@@ -335,13 +333,9 @@ def cli():
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--check-every", type=int, default=None)
 
-    parser.add_argument("--r-lif-on", type=float, default=None)
-    parser.add_argument("--r-pf-break", type=float, default=None)
     parser.add_argument("--r-pf-probe", type=float, default=None)
-
-    parser.add_argument("--rate-pf-mode", choices=["hard", "sigmoid"], default=default_cfg.rate_pf_mode)
-    parser.add_argument("--rate-pf-mid", type=float, default=default_cfg.rate_pf_mid)
-    parser.add_argument("--rate-pf-width", type=float, default=default_cfg.rate_pf_width)
+    parser.add_argument("--sigma-mid", type=float, default=default_cfg.sigma_mid)
+    parser.add_argument("--sigma-width", type=float, default=default_cfg.sigma_width)
 
     parser.add_argument(
         "--reaction-mode",
@@ -394,13 +388,13 @@ def cli():
     parser.add_argument(
         "--candidate-log-file",
         default=None,
-        help="CSV candidate / near-miss log. Use .gz for gzip.",
+        help="CSV sigma candidate log. Use .gz for gzip.",
     )
     parser.add_argument(
         "--candidate-log-top-n",
         type=int,
         default=default_cfg.candidate_log_top_n,
-        help="Number of closest candidate/near-miss records to log per check.",
+        help="Number of top sigma candidate records to log per check.",
     )
 
     parser.add_argument(
@@ -428,12 +422,9 @@ def cli():
         settings_file=str(Path(args.settings).expanduser().resolve()),
         steps=args.steps if args.steps is not None else default_cfg.steps,
         check_every=args.check_every if args.check_every is not None else default_cfg.check_every,
-        r_lif_on=args.r_lif_on if args.r_lif_on is not None else default_cfg.r_lif_on,
-        r_pf_break=args.r_pf_break if args.r_pf_break is not None else default_cfg.r_pf_break,
         r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
-        rate_pf_mode=args.rate_pf_mode,
-        rate_pf_mid=args.rate_pf_mid,
-        rate_pf_width=args.rate_pf_width,
+        sigma_mid=args.sigma_mid,
+        sigma_width=args.sigma_width,
         reaction_mode=args.reaction_mode,
         reaction_rate_ps=args.reaction_rate_ps,
         activation_energy_eV=args.activation_energy_eV,
