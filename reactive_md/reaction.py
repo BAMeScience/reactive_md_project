@@ -109,11 +109,15 @@ def reaction_probability(
     midpoint: float = 0.0,
     width: float = 0.2,
 ) -> float:
-    """Smooth sigma-dependent probability/rate factor for rate mode.
+    """Smooth sigma-dependent kinetic probability/rate factor.
 
-    This function is intentionally used only in rate mode. In Metropolis mode,
-    sigma ranks/selects the trial candidate, while the Metropolis criterion uses
-    only Delta E and beta.
+    The value is used as the kinetic accessibility factor p_sigma.
+
+    In hybrid Metropolis mode:
+        p_total = p_sigma(sigma) * p_metropolis(Delta E)
+
+    In rate mode:
+        k_eff = k_base * p_sigma(sigma)
     """
     if width <= 0.0:
         raise ValueError("Sigma width must be positive.")
@@ -453,11 +457,51 @@ def build_trial_forcefield(R, box, trial: dict, ff_ref: FFBundle):
     )
 
 
-def accept_reject(key, dE: float, beta: float):
-    p_acc = min(1.0, float(np.exp(-beta * dE)))
+def accept_reject(
+    key,
+    *,
+    sigma: float,
+    dE: float,
+    beta: float,
+    sigma_mid: float,
+    sigma_width: float,
+):
+    """Hybrid kinetic/thermodynamic acceptance criterion.
+
+    sigma controls whether the reaction is kinetically accessible.
+    Delta E controls whether the proposed topology change is thermodynamically
+    accepted.
+
+    Returns
+    -------
+    key:
+        Updated JAX random key.
+    accepted:
+        Whether the reaction is accepted.
+    p_total:
+        Total acceptance probability, p_sigma * p_metropolis.
+    p_sigma:
+        Kinetic probability from the reaction coordinate.
+    p_metropolis:
+        Thermodynamic Metropolis probability from Delta E.
+    """
+    p_sigma = reaction_probability(
+        sigma,
+        midpoint=sigma_mid,
+        width=sigma_width,
+    )
+
+    if not np.isfinite(dE):
+        return key, False, 0.0, p_sigma, 0.0
+
+    exponent = float(np.clip(-beta * float(dE), -700.0, 700.0))
+    p_metropolis = min(1.0, float(np.exp(exponent)))
+    p_total = float(np.clip(p_sigma * p_metropolis, 0.0, 1.0))
+
     key, sub = jax.random.split(key)
     u = float(jax.random.uniform(sub))
-    return key, (u < p_acc), p_acc
+
+    return key, (u < p_total), p_total, p_sigma, p_metropolis
 
 
 def maybe_react_one_event(
@@ -478,15 +522,20 @@ def maybe_react_one_event(
     li_type: int,
     r_pf_probe: float,
     beta: float,
+    sigma_mid: float = 0.0,
+    sigma_width: float = 0.2,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
 ):
-    """Attempt one Metropolis reaction event.
+    """Attempt one hybrid kinetic/thermodynamic Metropolis reaction event.
 
-    In Metropolis mode, sigma is used only to rank/select the reaction
-    candidate. There is no separate sigma-dependent proposal probability. The
-    stochastic acceptance step is solely the Metropolis criterion based on
-    Delta E and beta.
+    sigma ranks/selects the reaction candidate and contributes a kinetic
+    accessibility factor p_sigma. Delta E contributes the thermodynamic
+    Metropolis factor p_metropolis.
+
+    The final acceptance probability is
+
+        p_total = p_sigma(sigma) * p_metropolis(Delta E)
     """
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
@@ -566,6 +615,27 @@ def maybe_react_one_event(
         n_min=2,
     )
 
+    if not bool(jnp.all(jnp.isfinite(R_relaxed))):
+        sigma = candidate_info["sigma"]
+        p_sigma = reaction_probability(
+            sigma,
+            midpoint=sigma_mid,
+            width=sigma_width,
+        )
+        return key, False, ff, sys, {
+            "mode": "metropolis",
+            "reason": "nonfinite_relaxed_geometry",
+            "candidate": candidate_info,
+            "dE": float("nan"),
+            "p_acc": 0.0,
+            "p_total": 0.0,
+            "p_sigma": p_sigma,
+            "p_metropolis": 0.0,
+            "sigma_mid": sigma_mid,
+            "sigma_width": sigma_width,
+            "candidate_records": candidate_records,
+        }, R
+
     if mc_energy_evaluator is None:
         E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
         E_after_arr.block_until_ready()
@@ -574,13 +644,26 @@ def maybe_react_one_event(
         E_after = mc_energy_evaluator.energy(R_relaxed)
 
     dE = E_after - E_before
-    key, accepted, p_acc = accept_reject(key, dE, beta)
+    sigma = candidate_info["sigma"]
+    key, accepted, p_total, p_sigma, p_metropolis = accept_reject(
+        key,
+        sigma=sigma,
+        dE=dE,
+        beta=beta,
+        sigma_mid=sigma_mid,
+        sigma_width=sigma_width,
+    )
 
     info = {
         "mode": "metropolis",
         "candidate": candidate_info,
         "dE": dE,
-        "p_acc": p_acc,
+        "p_acc": p_total,  # Backwards-compatible alias for existing log readers.
+        "p_total": p_total,
+        "p_sigma": p_sigma,
+        "p_metropolis": p_metropolis,
+        "sigma_mid": sigma_mid,
+        "sigma_width": sigma_width,
         "candidate_records": candidate_records,
     }
 

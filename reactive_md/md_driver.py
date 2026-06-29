@@ -58,7 +58,7 @@ def _write_event_header(event_file):
         "step,event,event_index,mode,n_candidates,n_accepted_this_check,"
         "p_rate,k_rate_ps,dt_reactive_ps,"
         "pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,sigma,dE,p_acc,reacted_count\n"
+        "d_lif,d_pf,sigma,dE,p_acc,p_sigma,p_metropolis,p_total,reacted_count\n"
     )
     event_file.flush()
 
@@ -82,7 +82,7 @@ def _write_rate_check(
         f"{info.get('p_rate', '')},"
         f"{info.get('k_rate_ps', '')},"
         f"{info.get('dt_reactive_ps', '')},"
-        ",,,,,,,,"
+        ",,,,,,,,,,,"
         f"{reacted_count}\n"
     )
     event_file.flush()
@@ -123,6 +123,9 @@ def _write_accepted_event(
         f"{sigma},"
         f"{info.get('dE', '')},"
         f"{info.get('p_acc', '')},"
+        f"{info.get('p_sigma', '')},"
+        f"{info.get('p_metropolis', '')},"
+        f"{info.get('p_total', '')},"
         f"{reacted_count}\n"
     )
     event_file.flush()
@@ -375,7 +378,9 @@ def run_md_nvt_with_reactions(
                     f"d_PF={float(d_pf):.3f}"
                     f"{sigma_text}, "
                     f"dE={float(info.get('dE')):.4f}, "
-                    f"p={float(info.get('p_acc')):.3f}"
+                    f"p_sigma={float(info.get('p_sigma')):.3f}, "
+                    f"pM={float(info.get('p_metropolis')):.3f}, "
+                    f"p={float(info.get('p_total', info.get('p_acc'))):.3f}"
                 )
 
             _write_accepted_event(
@@ -422,10 +427,14 @@ def run_md_nvt_with_reactions(
                 extra = ""
                 if "dE" in info:
                     extra += f", dE={float(info['dE']):.4f}"
-                if "p_acc" in info:
+                if "p_sigma" in info:
+                    extra += f", p_sigma={float(info['p_sigma']):.3f}"
+                if "p_metropolis" in info:
+                    extra += f", pM={float(info['p_metropolis']):.3f}"
+                if "p_total" in info:
+                    extra += f", p_total={float(info['p_total']):.3f}"
+                elif "p_acc" in info:
                     extra += f", p_acc={float(info['p_acc']):.3f}"
-                if "proposal_factor" in info:
-                    extra += f", proposal_factor={float(info['proposal_factor']):.3f}"
 
                 print(
                     " No reaction accepted for candidate: "
