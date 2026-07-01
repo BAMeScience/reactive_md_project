@@ -544,17 +544,17 @@ def maybe_react_one_event(
     u_sigma = float(jax.random.uniform(sub))
 
     if u_sigma >= p_sigma:
-        return key, False, ff, sys, {
-            "mode": "metropolis",
-            "reason": "sigma_gate_rejected",
-            "candidate": candidate_info,
-            "p_sigma": p_sigma,
-            "p_metropolis": "",
-            "p_total": 0.0,
-            "p_acc": 0.0,
-            "u_sigma": u_sigma,
-            "candidate_records": candidate_records,
-        }, R
+       return key, False, ff, sys, {
+         "mode": "metropolis",
+         "candidate": candidate_info,
+         "reason": "sigma_gate_rejected",
+         "p_sigma": p_sigma,
+         "p_metropolis": 0.0,
+         "p_total": 0.0,
+         "p_acc": 0.0,
+         "u_sigma": u_sigma,
+         "candidate_records": candidate_records,
+       }, R
 
     if mc_energy_evaluator is None:
         nlist_before = ff.neighbor_fn.update(R, ff.nlist)
