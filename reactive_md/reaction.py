@@ -460,52 +460,17 @@ def build_trial_forcefield(R, box, trial: dict, ff_ref: FFBundle):
     )
 
 
-def accept_reject(
-    key,
-    *,
-    sigma: float,
-    dE: float,
-    beta: float,
-    sigma_mid: float,
-    sigma_width: float,
-):
-    """Hybrid kinetic/thermodynamic acceptance criterion.
-
-    sigma controls whether the reaction is kinetically accessible.
-    Delta E controls whether the proposed topology change is thermodynamically
-    accepted.
-
-    Returns
-    -------
-    key:
-        Updated JAX random key.
-    accepted:
-        Whether the reaction is accepted.
-    p_total:
-        Total acceptance probability, p_sigma * p_metropolis.
-    p_sigma:
-        Kinetic probability from the reaction coordinate.
-    p_metropolis:
-        Thermodynamic Metropolis probability from Delta E.
-    """
-    p_sigma = reaction_probability(
-        sigma,
-        midpoint=sigma_mid,
-        width=sigma_width,
-    )
-
+def accept_reject(key, *, dE: float, beta: float):
     if not np.isfinite(dE):
-        return key, False, 0.0, p_sigma, 0.0
+        return key, False, 0.0
 
     exponent = float(np.clip(-beta * float(dE), -700.0, 700.0))
     p_metropolis = min(1.0, float(np.exp(exponent)))
-    p_total = float(np.clip(p_sigma * p_metropolis, 0.0, 1.0))
 
     key, sub = jax.random.split(key)
     u = float(jax.random.uniform(sub))
 
-    return key, (u < p_total), p_total, p_sigma, p_metropolis
-
+    return key, (u < p_metropolis), p_metropolis
 
 def maybe_react_one_event(
     key,
@@ -530,16 +495,6 @@ def maybe_react_one_event(
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
 ):
-    """Attempt one hybrid kinetic/thermodynamic Metropolis reaction event.
-
-    sigma ranks/selects the reaction candidate and contributes a kinetic
-    accessibility factor p_sigma. Delta E contributes the thermodynamic
-    Metropolis factor p_metropolis.
-
-    The final acceptance probability is
-
-        p_total = p_sigma(sigma) * p_metropolis(Delta E)
-    """
     pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
     li_atoms_np = np.array(li_atoms, dtype=np.int32)
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
@@ -552,6 +507,7 @@ def maybe_react_one_event(
         ff.disp_fn,
         pf6_reacted_np=pf6_reacted_np,
     )
+
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -565,7 +521,40 @@ def maybe_react_one_event(
         }, R
 
     cand = candidates[0]
-    candidate_info = _candidate_info(cand)
+
+    candidate_info = {
+        "k_pf6": cand.k_pf6,
+        "li_idx": cand.li_idx,
+        "leave_F": cand.leave_F,
+        "d_lif": cand.d_lif,
+        "d_pf": cand.d_pf,
+        "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
+    }
+
+    sigma = candidate_info["sigma"]
+
+    # Kinetic sigma gate BEFORE expensive topology/FIRE/energy work.
+    p_sigma = reaction_probability(
+        sigma,
+        midpoint=sigma_mid,
+        width=sigma_width,
+    )
+
+    key, sub = jax.random.split(key)
+    u_sigma = float(jax.random.uniform(sub))
+
+    if u_sigma >= p_sigma:
+        return key, False, ff, sys, {
+            "mode": "metropolis",
+            "reason": "sigma_gate_rejected",
+            "candidate": candidate_info,
+            "p_sigma": p_sigma,
+            "p_metropolis": "",
+            "p_total": 0.0,
+            "p_acc": 0.0,
+            "u_sigma": u_sigma,
+            "candidate_records": candidate_records,
+        }, R
 
     if mc_energy_evaluator is None:
         nlist_before = ff.neighbor_fn.update(R, ff.nlist)
@@ -592,6 +581,10 @@ def maybe_react_one_event(
             "mode": "metropolis",
             "reason": "type_sanity_failed",
             "candidate": candidate_info,
+            "p_sigma": p_sigma,
+            "p_metropolis": "",
+            "p_total": 0.0,
+            "p_acc": 0.0,
             "candidate_records": candidate_records,
         }, R
 
@@ -619,23 +612,15 @@ def maybe_react_one_event(
     )
 
     if not bool(jnp.all(jnp.isfinite(R_relaxed))):
-        sigma = candidate_info["sigma"]
-        p_sigma = reaction_probability(
-            sigma,
-            midpoint=sigma_mid,
-            width=sigma_width,
-        )
         return key, False, ff, sys, {
             "mode": "metropolis",
             "reason": "nonfinite_relaxed_geometry",
             "candidate": candidate_info,
             "dE": float("nan"),
-            "p_acc": 0.0,
-            "p_total": 0.0,
             "p_sigma": p_sigma,
             "p_metropolis": 0.0,
-            "sigma_mid": sigma_mid,
-            "sigma_width": sigma_width,
+            "p_total": 0.0,
+            "p_acc": 0.0,
             "candidate_records": candidate_records,
         }, R
 
@@ -647,21 +632,20 @@ def maybe_react_one_event(
         E_after = mc_energy_evaluator.energy(R_relaxed)
 
     dE = E_after - E_before
-    sigma = candidate_info["sigma"]
-    key, accepted, p_total, p_sigma, p_metropolis = accept_reject(
+
+    key, accepted, p_metropolis = accept_reject(
         key,
-        sigma=sigma,
         dE=dE,
         beta=beta,
-        sigma_mid=sigma_mid,
-        sigma_width=sigma_width,
     )
+
+    p_total = float(p_sigma * p_metropolis)
 
     info = {
         "mode": "metropolis",
         "candidate": candidate_info,
         "dE": dE,
-        "p_acc": p_total,  # Backwards-compatible alias for existing log readers.
+        "p_acc": p_total,
         "p_total": p_total,
         "p_sigma": p_sigma,
         "p_metropolis": p_metropolis,
@@ -675,6 +659,7 @@ def maybe_react_one_event(
 
     pf6_reacted_np[cand.k_pf6] = True
     sys_new = make_system_state_from_trial(trial, pf6_reacted_np)
+
     info["accepted_event"] = candidate_info
 
     return key, True, ff_trial, sys_new, info, R_relaxed
