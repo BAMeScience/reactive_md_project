@@ -170,7 +170,9 @@ reactive-md \
 
 ## 1. Metropolis Mode
 
-Topology changes are proposed according to the sigma-based geometric probability and accepted according to a Metropolis criterion:
+Topology changes are proposed using the reaction coordinate σ and accepted according to a hybrid kinetic/thermodynamic Metropolis scheme.
+
+The reaction coordinate σ is first evaluated to determine whether a reaction trial should be attempted. Only if this kinetic condition is satisfied is the expensive trial topology generated, FIRE-relaxed, and evaluated with the selected energy model (classical force field or MACE). The final thermodynamic acceptance is then determined using the Metropolis criterion based on the energy difference ΔE. Trial reactions yielding non-finite energy differences are automatically rejected.
 
 ```bash
 reactive-md \
@@ -346,14 +348,33 @@ reactive_md/
 │   └── templates_pf5.py
 
 tests/
+├── test_candidate_selection.py
 ├── test_config.py
 ├── test_forcefield.py
+├── test_lipf6.py
 ├── test_main.py
+├── test_main_cli.py
 ├── test_md_driver.py
-├── test_reaction.py
-├── test_reaction_sigma.py
+├── test_metropolis.py
+├── test_reaction_coordinate.py
 ├── test_template_pf5.py
-└── test_topology_opls.py
+└── test_topology_change.py
+
+| Test                          | Purpose                                         |
+| ----------------------------- | ----------------------------------------------- |
+| `test_candidate_selection.py` | Reaction candidate identification and ranking.  |
+| `test_config.py`              | Configuration defaults and validation.          |
+| `test_forcefield.py`          | Force-field construction and evaluation.        |
+| `test_lipf6.py`               | LiPF₆ topology and chemistry utilities.         |
+| `test_main.py`                | Core simulation workflow.                       |
+| `test_main_cli.py`            | Command-line interface.                         |
+| `test_md_driver.py`           | MD driver and reaction integration.             |
+| `test_metropolis.py`          | Metropolis acceptance criterion.                |
+| `test_reaction_coordinate.py` | Reaction coordinate (σ) evaluation.             |
+| `test_template_pf5.py`        | PF₅ template generation.                        |
+| `test_topology_change.py`     | Topology modification after accepted reactions. |
+
+
 ```
 
 ---
