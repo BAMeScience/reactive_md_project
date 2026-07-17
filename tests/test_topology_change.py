@@ -69,8 +69,37 @@ def _free_space_functions():
 
     return disp_fn, shift_fn
 
+import jax.numpy as jnp
+import pytest
 
-def test_prepare_r_probe_moves_f_to_lj_target():
+from reactive_md.reaction import prepare_probe_geometry
+
+
+def _free_space_functions():
+    """Return displacement and shift functions without periodic boundaries."""
+
+    def disp_fn(position_a, position_b):
+        return position_b - position_a
+
+    def shift_fn(position, displacement):
+        return position + displacement
+
+    return disp_fn, shift_fn
+
+
+def _distance(R, atom_a, atom_b, disp_fn):
+    displacement = disp_fn(R[atom_a], R[atom_b])
+    return float(jnp.linalg.norm(displacement))
+
+
+def _pf_lj_target(sigma_p, sigma_f):
+    sigma_pf = 0.5 * (sigma_p + sigma_f)
+    return 2.0 ** (1.0 / 6.0) * sigma_pf
+
+
+def test_prepare_r_probe_moves_f_to_lj_target_and_preserves_lif():
+    """The probe reaches the P-F target while preserving Li-F."""
+
     disp_fn, shift_fn = _free_space_functions()
 
     p_atom = 0
@@ -79,12 +108,29 @@ def test_prepare_r_probe_moves_f_to_lj_target():
 
     R = jnp.array(
         [
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-        ]
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [2.0, 1.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
     )
 
-    trial_sigmas = jnp.array([3.0, 3.4])
+    trial_sigmas = jnp.array(
+        [3.0, 3.4, 2.1],
+        dtype=jnp.float32,
+    )
+
+    initial_lif_distance = _distance(
+        R,
+        li_atom,
+        f_atom,
+        disp_fn,
+    )
+
+    expected_pf_distance = _pf_lj_target(
+        float(trial_sigmas[p_atom]),
+        float(trial_sigmas[f_atom]),
+    )
 
     R_probe = prepare_probe_geometry(
         R,
@@ -97,46 +143,62 @@ def test_prepare_r_probe_moves_f_to_lj_target():
         shift_fn=shift_fn,
     )
 
-    sigma_pf = 0.5 * (
-        float(trial_sigmas[p_atom])
-        + float(trial_sigmas[f_atom])
+    actual_pf_distance = _distance(
+        R_probe,
+        p_atom,
+        f_atom,
+        disp_fn,
     )
-    expected_distance = 2.0 ** (1.0 / 6.0) * sigma_pf
 
-    pf_vector = disp_fn(
-        R_probe[p_atom],
-        R_probe[f_atom],
+    actual_lif_distance = _distance(
+        R_probe,
+        li_atom,
+        f_atom,
+        disp_fn,
     )
-    actual_distance = float(jnp.linalg.norm(pf_vector))
 
-    assert actual_distance == pytest.approx(
-        expected_distance,
+    assert actual_pf_distance == pytest.approx(
+        expected_pf_distance,
         rel=1.0e-6,
     )
-    assert jnp.allclose(R_probe[p_atom], R[p_atom])
 
-def test_prepare_r_probe_does_not_move_f_when_already_separated():
+    assert actual_lif_distance == pytest.approx(
+        initial_lif_distance,
+        rel=1.0e-6,
+    )
+
+    # P and Li must remain unchanged.
+    assert jnp.allclose(R_probe[p_atom], R[p_atom])
+    assert jnp.allclose(R_probe[li_atom], R[li_atom])
+
+
+def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
+    """An impossible pair of target distances leaves R unchanged."""
+
     disp_fn, shift_fn = _free_space_functions()
 
     p_atom = 0
     f_atom = 1
     li_atom = 2
 
-    trial_sigmas = jnp.array([3.0, 3.4])
-
-    sigma_pf = 0.5 * (
-        float(trial_sigmas[p_atom])
-        + float(trial_sigmas[f_atom])
-    )
-    target_distance = 2.0 ** (1.0 / 6.0) * sigma_pf
-
-    # Place F beyond the required target distance.
-    initial_distance = target_distance + 1.0
+    # P-Li = 2.0 and Li-F = 1.0.
+    #
+    # The P-F LJ target is approximately 3.59, so the two target
+    # spheres cannot intersect:
+    #
+    # 3.59 > 2.0 + 1.0
     R = jnp.array(
         [
-            [0.0, 0.0, 0.0],
-            [initial_distance, 0.0, 0.0],
-        ]
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [2.0, 0.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
+    )
+
+    trial_sigmas = jnp.array(
+        [3.0, 3.4, 2.1],
+        dtype=jnp.float32,
     )
 
     R_probe = prepare_probe_geometry(
@@ -153,21 +215,42 @@ def test_prepare_r_probe_does_not_move_f_when_already_separated():
     assert jnp.allclose(R_probe, R)
 
 
-def test_prepare_r_probe_returns_finite_coordinates():
+def test_prepare_r_probe_handles_collinear_geometry():
+    """The deterministic fallback handles collinear P-F-Li atoms."""
+
     disp_fn, shift_fn = _free_space_functions()
 
     p_atom = 0
     f_atom = 1
     li_atom = 2
 
+    # These atoms are collinear, but the target spheres intersect.
+    # This exercises the fallback perpendicular direction.
     R = jnp.array(
         [
-            [0.0, 0.0, 0.0],
-            [0.5, 0.5, 0.5],
-        ]
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [4.0, 0.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
     )
 
-    trial_sigmas = jnp.array([3.0, 3.4])
+    trial_sigmas = jnp.array(
+        [3.0, 3.4, 2.1],
+        dtype=jnp.float32,
+    )
+
+    initial_lif_distance = _distance(
+        R,
+        li_atom,
+        f_atom,
+        disp_fn,
+    )
+
+    expected_pf_distance = _pf_lj_target(
+        float(trial_sigmas[p_atom]),
+        float(trial_sigmas[f_atom]),
+    )
 
     R_probe = prepare_probe_geometry(
         R,
@@ -180,5 +263,31 @@ def test_prepare_r_probe_returns_finite_coordinates():
         shift_fn=shift_fn,
     )
 
+    actual_pf_distance = _distance(
+        R_probe,
+        p_atom,
+        f_atom,
+        disp_fn,
+    )
 
-    assert bool(jnp.all(jnp.isfinite(R_probe)))
+    actual_lif_distance = _distance(
+        R_probe,
+        li_atom,
+        f_atom,
+        disp_fn,
+    )
+
+    assert jnp.all(jnp.isfinite(R_probe))
+
+    assert actual_pf_distance == pytest.approx(
+        expected_pf_distance,
+        rel=1.0e-6,
+    )
+
+    assert actual_lif_distance == pytest.approx(
+        initial_lif_distance,
+        rel=1.0e-6,
+    )
+
+    assert jnp.allclose(R_probe[p_atom], R[p_atom])
+    assert jnp.allclose(R_probe[li_atom], R[li_atom])
