@@ -164,7 +164,7 @@ def test_prepare_r_probe_returns_finite_coordinates():
 
     trial_sigmas = jnp.array([3.0, 3.4])
 
-   R_probe = prepare_probe_geometry(
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
