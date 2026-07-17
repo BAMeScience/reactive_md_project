@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import pytest
 
 from reactive_md.reaction import make_probe_geometry
-from reactive_md.reaction import prepare_r_probe
+from reactive_md.reaction import prepare_probe_geometry
 
 
 def _disp(a, b):
@@ -86,7 +86,7 @@ def test_prepare_r_probe_moves_f_to_lj_target():
 
     trial_sigmas = jnp.array([3.0, 3.4])
 
-    R_probe = prepare_r_probe(
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=p_atom,
         F_atom=f_atom,
@@ -155,7 +155,7 @@ def test_prepare_r_probe_does_not_move_f_when_already_separated():
         ]
     )
 
-    R_probe = prepare_r_probe(
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=p_atom,
         F_atom=f_atom,
@@ -182,7 +182,7 @@ def test_prepare_r_probe_returns_finite_coordinates():
 
     trial_sigmas = jnp.array([3.0, 3.4])
 
-    R_probe = prepare_r_probe(
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=p_atom,
         F_atom=f_atom,
