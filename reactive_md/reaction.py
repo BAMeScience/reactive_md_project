@@ -268,6 +268,44 @@ def make_probe_geometry(
 
     return R.at[leave_F].set(rF_new)
 
+def prepare_probe_geometry(
+    R,
+    *,
+    P_atom: int,
+    leave_F: int,
+    disp_fn,
+    shift_fn,
+    sigma_p: float,
+    sigma_f: float,
+    safety_factor: float = 1.0,
+):
+    """Remove a severe product-side P/F overlap.
+
+    The F atom is moved only when its P-F distance is below the
+    Lennard-Jones equilibrium separation.
+    """
+    rP = R[P_atom]
+    rF = R[leave_F]
+
+    pf_vec = disp_fn(rP, rF)
+    pf_dist = jnp.linalg.norm(pf_vec)
+
+    mixed_sigma = 0.5 * (sigma_p + sigma_f)
+    target_dist = safety_factor * 2.0 ** (1.0 / 6.0) * mixed_sigma
+
+    # Normally impossible, but avoids division by zero.
+    fallback = jnp.array([1.0, 0.0, 0.0], dtype=R.dtype)
+    direction = jnp.where(
+        pf_dist > 1.0e-8,
+        pf_vec / pf_dist,
+        fallback,
+    )
+
+    displacement = jnp.maximum(target_dist - pf_dist, 0.0)
+    return R.at[leave_F].set(
+        shift_fn(rF, displacement * direction)
+    )
+
 def propose_reaction_trial(
     sys: SystemState,
     cand: ReactionCandidate,
@@ -589,14 +627,25 @@ def maybe_react_one_event(
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
     P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-    R_probe = make_probe_geometry(
+#    R_probe = make_probe_geometry(
+#        R,
+#        P_atom=P_atom,
+#        leave_F=cand.leave_F,
+#        disp_fn=ff.disp_fn,
+#        shift_fn=shift_fn,
+#        r_pf_probe=r_pf_probe,
+#    )
+
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=P_atom,
         leave_F=cand.leave_F,
-        disp_fn=ff.disp_fn,
+        disp_fn=ff_trial.disp_fn,
         shift_fn=shift_fn,
-        r_pf_probe=r_pf_probe,
+        sigma_p=float(trial["sigmas"][P_atom]),
+        sigma_f=float(trial["sigmas"][cand.leave_F]),
     )
+
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
         R_probe,
@@ -787,13 +836,23 @@ def maybe_react_rate_events(
         ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-        R_probe = make_probe_geometry(
-            R_current,
+        #R_probe = make_probe_geometry(
+        #    R_current,
+        #    P_atom=P_atom,
+        #    leave_F=cand.leave_F,
+        #    disp_fn=ff_current.disp_fn,
+        #    shift_fn=shift_fn,
+        #    r_pf_probe=r_pf_probe,
+        #)
+       
+        R_probe = prepare_probe_geometry(
+            R,
             P_atom=P_atom,
             leave_F=cand.leave_F,
-            disp_fn=ff_current.disp_fn,
+            disp_fn=ff_trial.disp_fn,
             shift_fn=shift_fn,
-            r_pf_probe=r_pf_probe,
+            sigma_p=float(trial["sigmas"][P_atom]),
+            sigma_f=float(trial["sigmas"][cand.leave_F]),
         )
 
         R_relaxed, _nlist_relaxed = fire_relax_with_nlist(
