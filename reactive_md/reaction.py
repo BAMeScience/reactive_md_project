@@ -280,88 +280,35 @@ def prepare_probe_geometry(
     shift_fn,
     eps: float = 1.0e-8,
 ):
-    """Place the departing F at a safe P-F distance while preserving Li-F."""
+    """Move the departing F from P toward the reacting Li."""
 
     r_p = R[P_atom]
     r_f = R[leave_F]
     r_li = R[li_idx]
 
-    # Target P-F distance from the product LJ parameters.
     r_pf_target = (
         2.0 ** (1.0 / 6.0)
         * 0.5
         * (sigma_p + sigma_f)
     )
 
-    # Preserve the current Li-F distance.
-    r_lif_target = jnp.linalg.norm(
-        disp_fn(r_li, r_f)
+    p_to_li = disp_fn(r_p, r_li)
+    p_to_li_distance = jnp.linalg.norm(p_to_li)
+
+    direction_to_li = (
+        p_to_li
+        / jnp.maximum(p_to_li_distance, eps)
     )
 
-    # P -> Li vector and distance.
-    p_to_li = disp_fn(r_p, r_li)
-    d_pli = jnp.linalg.norm(p_to_li)
-    axis = p_to_li / jnp.maximum(d_pli, eps)
-
-    # Check whether the two target-distance spheres intersect.
-    min_pli = jnp.abs(r_pf_target - r_lif_target)
-    max_pli = r_pf_target + r_lif_target
+    f_probe = shift_fn(
+        r_p,
+        r_pf_target * direction_to_li,
+    )
 
     geometry_is_valid = (
-        (d_pli >= min_pli)
-        & (d_pli <= max_pli)
-        & (d_pli > eps)
+        p_to_li_distance > r_pf_target
     )
 
-    # Centre and radius of the intersection circle.
-    circle_x = (
-        r_pf_target**2
-        - r_lif_target**2
-        + d_pli**2
-    ) / (2.0 * jnp.maximum(d_pli, eps))
-
-    circle_radius = jnp.sqrt(
-        jnp.maximum(
-            r_pf_target**2 - circle_x**2,
-            0.0,
-        )
-    )
-
-    # Select the point closest to the original P -> F direction.
-    p_to_f = disp_fn(r_p, r_f)
-
-    perpendicular = (
-        p_to_f
-        - jnp.dot(p_to_f, axis) * axis
-    )
-    perpendicular_norm = jnp.linalg.norm(perpendicular)
-
-    reference = jnp.where(
-        jnp.abs(axis[0]) < 0.9,
-        jnp.array([1.0, 0.0, 0.0], dtype=R.dtype),
-        jnp.array([0.0, 1.0, 0.0], dtype=R.dtype),
-    )
-
-    fallback = jnp.cross(axis, reference)
-    fallback /= jnp.maximum(
-        jnp.linalg.norm(fallback),
-        eps,
-    )
-
-    perpendicular_direction = jnp.where(
-        perpendicular_norm > eps,
-        perpendicular / jnp.maximum(perpendicular_norm, eps),
-        fallback,
-    )
-
-    p_to_f_probe = (
-        circle_x * axis
-        + circle_radius * perpendicular_direction
-    )
-
-    f_probe = shift_fn(r_p, p_to_f_probe)
-
-    # If no valid intersection exists, leave the coordinates unchanged.
     new_f = jnp.where(
         geometry_is_valid,
         f_probe,
