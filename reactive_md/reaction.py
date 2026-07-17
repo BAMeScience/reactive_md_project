@@ -273,38 +273,102 @@ def prepare_probe_geometry(
     *,
     P_atom: int,
     leave_F: int,
-    disp_fn,
-    shift_fn,
+    li_idx: int,
     sigma_p: float,
     sigma_f: float,
-    safety_factor: float = 1.0,
+    disp_fn,
+    shift_fn,
+    eps: float = 1.0e-8,
 ):
-    """Remove a severe product-side P/F overlap.
+    """Place the departing F at a safe P-F distance while preserving Li-F."""
 
-    The F atom is moved only when its P-F distance is below the
-    Lennard-Jones equilibrium separation.
-    """
-    rP = R[P_atom]
-    rF = R[leave_F]
+    r_p = R[P_atom]
+    r_f = R[leave_F]
+    r_li = R[li_idx]
 
-    pf_vec = disp_fn(rP, rF)
-    pf_dist = jnp.linalg.norm(pf_vec)
+    # Target P-F distance from the product LJ parameters.
+    r_pf_target = (
+        2.0 ** (1.0 / 6.0)
+        * 0.5
+        * (sigma_p + sigma_f)
+    )
 
-    mixed_sigma = 0.5 * (sigma_p + sigma_f)
-    target_dist = safety_factor * 2.0 ** (1.0 / 6.0) * mixed_sigma
+    # Preserve the current Li-F distance.
+    r_lif_target = jnp.linalg.norm(
+        disp_fn(r_li, r_f)
+    )
 
-    # Normally impossible, but avoids division by zero.
-    fallback = jnp.array([1.0, 0.0, 0.0], dtype=R.dtype)
-    direction = jnp.where(
-        pf_dist > 1.0e-8,
-        pf_vec / pf_dist,
+    # P -> Li vector and distance.
+    p_to_li = disp_fn(r_p, r_li)
+    d_pli = jnp.linalg.norm(p_to_li)
+    axis = p_to_li / jnp.maximum(d_pli, eps)
+
+    # Check whether the two target-distance spheres intersect.
+    min_pli = jnp.abs(r_pf_target - r_lif_target)
+    max_pli = r_pf_target + r_lif_target
+
+    geometry_is_valid = (
+        (d_pli >= min_pli)
+        & (d_pli <= max_pli)
+        & (d_pli > eps)
+    )
+
+    # Centre and radius of the intersection circle.
+    circle_x = (
+        r_pf_target**2
+        - r_lif_target**2
+        + d_pli**2
+    ) / (2.0 * jnp.maximum(d_pli, eps))
+
+    circle_radius = jnp.sqrt(
+        jnp.maximum(
+            r_pf_target**2 - circle_x**2,
+            0.0,
+        )
+    )
+
+    # Select the point closest to the original P -> F direction.
+    p_to_f = disp_fn(r_p, r_f)
+
+    perpendicular = (
+        p_to_f
+        - jnp.dot(p_to_f, axis) * axis
+    )
+    perpendicular_norm = jnp.linalg.norm(perpendicular)
+
+    reference = jnp.where(
+        jnp.abs(axis[0]) < 0.9,
+        jnp.array([1.0, 0.0, 0.0], dtype=R.dtype),
+        jnp.array([0.0, 1.0, 0.0], dtype=R.dtype),
+    )
+
+    fallback = jnp.cross(axis, reference)
+    fallback /= jnp.maximum(
+        jnp.linalg.norm(fallback),
+        eps,
+    )
+
+    perpendicular_direction = jnp.where(
+        perpendicular_norm > eps,
+        perpendicular / jnp.maximum(perpendicular_norm, eps),
         fallback,
     )
 
-    displacement = jnp.maximum(target_dist - pf_dist, 0.0)
-    return R.at[leave_F].set(
-        shift_fn(rF, displacement * direction)
+    p_to_f_probe = (
+        circle_x * axis
+        + circle_radius * perpendicular_direction
     )
+
+    f_probe = shift_fn(r_p, p_to_f_probe)
+
+    # If no valid intersection exists, leave the coordinates unchanged.
+    new_f = jnp.where(
+        geometry_is_valid,
+        f_probe,
+        r_f,
+    )
+
+    return R.at[leave_F].set(new_f)
 
 def propose_reaction_trial(
     sys: SystemState,
