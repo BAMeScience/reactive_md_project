@@ -704,12 +704,12 @@ def maybe_react_one_event(
         R,
         P_atom=P_atom,
         leave_F=cand.leave_F,
-        disp_fn=ff_trial.disp_fn,
-        shift_fn=shift_fn,
+        li_idx=cand.li_idx,
         sigma_p=float(trial["sigmas"][P_atom]),
         sigma_f=float(trial["sigmas"][cand.leave_F]),
+        disp_fn=ff_trial.disp_fn,
+        shift_fn=shift_fn,
     )
-
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
         R_probe,
@@ -913,10 +913,11 @@ def maybe_react_rate_events(
             R,
             P_atom=P_atom,
             leave_F=cand.leave_F,
-            disp_fn=ff_trial.disp_fn,
-            shift_fn=shift_fn,
+            li_idx=cand.li_idx,
             sigma_p=float(trial["sigmas"][P_atom]),
             sigma_f=float(trial["sigmas"][cand.leave_F]),
+            disp_fn=ff_trial.disp_fn,
+            shift_fn=shift_fn,
         )
 
         R_relaxed, _nlist_relaxed = fire_relax_with_nlist(
