@@ -253,10 +253,8 @@ def make_probe_geometry(
     shift_fn,
     r_pf_probe: float = 4.0,
 ):
-    """Move the leaving F away from P before product-side relaxation.
+    """Set the minimum-image P-F separation to r_pf_probe."""
 
-    This is a geometry preparation step, not a reaction criterion.
-    """
     rP = R[P_atom]
     rF = R[leave_F]
 
@@ -264,11 +262,11 @@ def make_probe_geometry(
     PF_dist = jnp.linalg.norm(PF_vec) + 1.0e-12
     uPF = PF_vec / PF_dist
 
-    rF_new = rP + r_pf_probe * uPF
-    drF = rF_new - rF
+    # Move F only by the required change in P-F distance.
+    drF = (r_pf_probe - PF_dist) * uPF
+    rF_new = shift_fn(rF, drF)
 
-    return R.at[leave_F].set(shift_fn(rF, drF))
-
+    return R.at[leave_F].set(rF_new)
 
 def propose_reaction_trial(
     sys: SystemState,
