@@ -75,6 +75,7 @@ def test_prepare_r_probe_moves_f_to_lj_target():
 
     p_atom = 0
     f_atom = 1
+    li_atom = 2
 
     R = jnp.array(
         [
@@ -89,7 +90,7 @@ def test_prepare_r_probe_moves_f_to_lj_target():
         R,
         P_atom=p_atom,
         leave_F=f_atom,
-        li_idx=cand.li_idx,
+        li_idx=li_atom,
         sigma_p=float(trial_sigmas[p_atom]),
         sigma_f=float(trial_sigmas[f_atom]),
         disp_fn=disp_fn,
@@ -119,6 +120,7 @@ def test_prepare_r_probe_does_not_move_f_when_already_separated():
 
     p_atom = 0
     f_atom = 1
+    li_atom = 2
 
     trial_sigmas = jnp.array([3.0, 3.4])
 
@@ -141,7 +143,7 @@ def test_prepare_r_probe_does_not_move_f_when_already_separated():
         R,
         P_atom=p_atom,
         leave_F=f_atom,
-        li_idx=cand.li_idx,
+        li_idx=li_atom,
         sigma_p=float(trial_sigmas[p_atom]),
         sigma_f=float(trial_sigmas[f_atom]),
         disp_fn=disp_fn,
@@ -156,6 +158,7 @@ def test_prepare_r_probe_returns_finite_coordinates():
 
     p_atom = 0
     f_atom = 1
+    li_atom = 2
 
     R = jnp.array(
         [
@@ -170,7 +173,7 @@ def test_prepare_r_probe_returns_finite_coordinates():
         R,
         P_atom=p_atom,
         leave_F=f_atom,
-        li_idx=cand.li_idx,
+        li_idx=li_atom,
         sigma_p=float(trial_sigmas[p_atom]),
         sigma_f=float(trial_sigmas[f_atom]),
         disp_fn=disp_fn,
