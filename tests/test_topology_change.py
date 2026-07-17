@@ -97,9 +97,7 @@ def _pf_lj_target(sigma_p, sigma_f):
     return 2.0 ** (1.0 / 6.0) * sigma_pf
 
 
-def test_prepare_r_probe_moves_f_to_lj_target_and_preserves_lif():
-    """The probe reaches the P-F target while preserving Li-F."""
-
+def test_prepare_r_probe_moves_f_to_lj_target_toward_li():
     disp_fn, shift_fn = _free_space_functions()
 
     p_atom = 0
@@ -110,7 +108,7 @@ def test_prepare_r_probe_moves_f_to_lj_target_and_preserves_lif():
         [
             [0.0, 0.0, 0.0],  # P
             [1.0, 0.0, 0.0],  # departing F
-            [2.0, 1.0, 0.0],  # Li
+            [5.0, 2.0, 0.0],  # Li
         ],
         dtype=jnp.float32,
     )
@@ -118,13 +116,6 @@ def test_prepare_r_probe_moves_f_to_lj_target_and_preserves_lif():
     trial_sigmas = jnp.array(
         [3.0, 3.4, 2.1],
         dtype=jnp.float32,
-    )
-
-    initial_lif_distance = _distance(
-        R,
-        li_atom,
-        f_atom,
-        disp_fn,
     )
 
     expected_pf_distance = _pf_lj_target(
@@ -150,26 +141,88 @@ def test_prepare_r_probe_moves_f_to_lj_target_and_preserves_lif():
         disp_fn,
     )
 
-    actual_lif_distance = _distance(
-        R_probe,
-        li_atom,
-        f_atom,
-        disp_fn,
+    p_to_li = disp_fn(
+        R_probe[p_atom],
+        R_probe[li_atom],
     )
+    p_to_f = disp_fn(
+        R_probe[p_atom],
+        R_probe[f_atom],
+    )
+
+    p_to_li_unit = p_to_li / jnp.linalg.norm(p_to_li)
+    p_to_f_unit = p_to_f / jnp.linalg.norm(p_to_f)
 
     assert actual_pf_distance == pytest.approx(
         expected_pf_distance,
         rel=1.0e-6,
     )
 
-    assert actual_lif_distance == pytest.approx(
-        initial_lif_distance,
+    assert jnp.allclose(
+        p_to_f_unit,
+        p_to_li_unit,
+        rtol=1.0e-6,
+        atol=1.0e-6,
+    )
+
+    assert jnp.allclose(R_probe[p_atom], R[p_atom])
+    assert jnp.allclose(R_probe[li_atom], R[li_atom])
+
+
+def test_prepare_r_probe_handles_collinear_geometry():
+    disp_fn, shift_fn = _free_space_functions()
+
+    p_atom = 0
+    f_atom = 1
+    li_atom = 2
+
+    R = jnp.array(
+        [
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [5.0, 0.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
+    )
+
+    trial_sigmas = jnp.array(
+        [3.0, 3.4, 2.1],
+        dtype=jnp.float32,
+    )
+
+    expected_pf_distance = _pf_lj_target(
+        float(trial_sigmas[p_atom]),
+        float(trial_sigmas[f_atom]),
+    )
+
+    R_probe = prepare_probe_geometry(
+        R,
+        P_atom=p_atom,
+        leave_F=f_atom,
+        li_idx=li_atom,
+        sigma_p=float(trial_sigmas[p_atom]),
+        sigma_f=float(trial_sigmas[f_atom]),
+        disp_fn=disp_fn,
+        shift_fn=shift_fn,
+    )
+
+    actual_pf_distance = _distance(
+        R_probe,
+        p_atom,
+        f_atom,
+        disp_fn,
+    )
+
+    assert jnp.all(jnp.isfinite(R_probe))
+
+    assert actual_pf_distance == pytest.approx(
+        expected_pf_distance,
         rel=1.0e-6,
     )
 
-    # P and Li must remain unchanged.
-    assert jnp.allclose(R_probe[p_atom], R[p_atom])
-    assert jnp.allclose(R_probe[li_atom], R[li_atom])
+    assert R_probe[f_atom, 0] > R_probe[p_atom, 0]
+    assert R_probe[f_atom, 0] < R_probe[li_atom, 0]
+    assert jnp.allclose(R_probe[f_atom, 1:], 0.0)
 
 
 def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
@@ -214,80 +267,3 @@ def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
 
     assert jnp.allclose(R_probe, R)
 
-
-def test_prepare_r_probe_handles_collinear_geometry():
-    """The deterministic fallback handles collinear P-F-Li atoms."""
-
-    disp_fn, shift_fn = _free_space_functions()
-
-    p_atom = 0
-    f_atom = 1
-    li_atom = 2
-
-    # These atoms are collinear, but the target spheres intersect.
-    # This exercises the fallback perpendicular direction.
-    R = jnp.array(
-        [
-            [0.0, 0.0, 0.0],  # P
-            [1.0, 0.0, 0.0],  # departing F
-            [4.0, 0.0, 0.0],  # Li
-        ],
-        dtype=jnp.float32,
-    )
-
-    trial_sigmas = jnp.array(
-        [3.0, 3.4, 2.1],
-        dtype=jnp.float32,
-    )
-
-    initial_lif_distance = _distance(
-        R,
-        li_atom,
-        f_atom,
-        disp_fn,
-    )
-
-    expected_pf_distance = _pf_lj_target(
-        float(trial_sigmas[p_atom]),
-        float(trial_sigmas[f_atom]),
-    )
-
-    R_probe = prepare_probe_geometry(
-        R,
-        P_atom=p_atom,
-        leave_F=f_atom,
-        li_idx=li_atom,
-        sigma_p=float(trial_sigmas[p_atom]),
-        sigma_f=float(trial_sigmas[f_atom]),
-        disp_fn=disp_fn,
-        shift_fn=shift_fn,
-    )
-
-    actual_pf_distance = _distance(
-        R_probe,
-        p_atom,
-        f_atom,
-        disp_fn,
-    )
-
-    actual_lif_distance = _distance(
-        R_probe,
-        li_atom,
-        f_atom,
-        disp_fn,
-    )
-
-    assert jnp.all(jnp.isfinite(R_probe))
-
-    assert actual_pf_distance == pytest.approx(
-        expected_pf_distance,
-        rel=1.0e-6,
-    )
-
-    assert actual_lif_distance == pytest.approx(
-        initial_lif_distance,
-        rel=1.0e-6,
-    )
-
-    assert jnp.allclose(R_probe[p_atom], R[p_atom])
-    assert jnp.allclose(R_probe[li_atom], R[li_atom])
