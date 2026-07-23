@@ -13,7 +13,7 @@ dependencies = [
     "numpy",
     "jax==0.10.1",
     "jaxlib==0.10.1",
-    "jax-cuda13-plugin==0.10.1"
+    "jax-cuda13-plugin==0.10.1",
     "jax-md",
     "optax<0.2.6",
 ]
