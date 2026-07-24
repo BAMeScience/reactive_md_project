@@ -167,18 +167,15 @@ def find_reaction_candidates(
     *,
     pf6_reacted_np: np.ndarray,
 ) -> list[ReactionCandidate]:
-    """Return Li-facing reaction candidates ranked by sigma.
+    """Return all possible reaction candidates, ranked by sigma.
 
-    For each unreacted PF6 and each Li ion, select the bonded fluorine whose
-    P-F direction is most closely aligned with the P-Li direction.
-
-    The resulting PF6-Li-F candidates are ranked using
+    Every unreacted PF6 fluorine and every Li ion is considered. No independent
+    Li-F or P-F hard cutoff is used. The only ordering variable is
 
         sigma = d(P-F) - d(Li-F)
     """
     Rj = jnp.asarray(R)
     candidates: list[ReactionCandidate] = []
-    eps = 1.0e-12
 
     for k in range(pf6_atoms_np.shape[0]):
         if pf6_reacted_np[k]:
@@ -188,71 +185,27 @@ def find_reaction_candidates(
         Fs = pf6_atoms_np[k, 1:]
 
         for li in li_atoms_np:
-            li_idx = int(li)
-
-            p_to_li = disp_fn(
-                Rj[P_atom],
-                Rj[li_idx],
-            )
-            p_to_li_norm = jnp.linalg.norm(p_to_li)
-
-            best_f_idx: int | None = None
-            best_alignment = -np.inf
-
             for f in Fs:
+                li_idx = int(li)
                 f_idx = int(f)
 
-                p_to_f = disp_fn(
-                    Rj[P_atom],
-                    Rj[f_idx],
+                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
+                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
+
+                candidates.append(
+                    ReactionCandidate(
+                        k_pf6=int(k),
+                        li_idx=li_idx,
+                        leave_F=f_idx,
+                        d_lif=float(d_lif),
+                        d_pf=float(d_pf),
+                    )
                 )
-                p_to_f_norm = jnp.linalg.norm(p_to_f)
-
-                alignment = jnp.dot(p_to_f, p_to_li) / (
-                    jnp.maximum(p_to_f_norm, eps)
-                    * jnp.maximum(p_to_li_norm, eps)
-                )
-
-                alignment_value = float(alignment)
-
-                if alignment_value > best_alignment:
-                    best_alignment = alignment_value
-                    best_f_idx = f_idx
-
-            if best_f_idx is None:
-                continue
-
-            d_lif = _distance(
-                disp_fn,
-                Rj,
-                li_idx,
-                best_f_idx,
-            )
-            d_pf = _distance(
-                disp_fn,
-                Rj,
-                P_atom,
-                best_f_idx,
-            )
-
-            candidates.append(
-                ReactionCandidate(
-                    k_pf6=int(k),
-                    li_idx=li_idx,
-                    leave_F=best_f_idx,
-                    d_lif=float(d_lif),
-                    d_pf=float(d_pf),
-                )
-            )
 
     candidates.sort(
-        key=lambda c: reaction_coordinate(
-            d_pf=c.d_pf,
-            d_lif=c.d_lif,
-        ),
+        key=lambda c: reaction_coordinate(d_pf=c.d_pf, d_lif=c.d_lif),
         reverse=True,
     )
-
     return candidates
 
 def candidate_records_from_reaction_candidates(
@@ -326,12 +279,11 @@ def prepare_probe_geometry(
     shift_fn,
     eps: float = 1.0e-8,
 ):
-    """Extend the selected P-F bond to the product-side target distance."""
-
-    del li_idx  # Li is used during F selection, not during placement.
+    """Move the departing F from P toward the reacting Li."""
 
     r_p = R[P_atom]
     r_f = R[leave_F]
+    r_li = R[li_idx]
 
     r_pf_target = (
         2.0 ** (1.0 / 6.0)
@@ -339,16 +291,28 @@ def prepare_probe_geometry(
         * (sigma_p + sigma_f)
     )
 
-    p_to_f = disp_fn(r_p, r_f)
-    pf_distance = jnp.linalg.norm(p_to_f)
-    direction = p_to_f / jnp.maximum(pf_distance, eps)
+    p_to_li = disp_fn(r_p, r_li)
+    p_to_li_distance = jnp.linalg.norm(p_to_li)
+
+    direction_to_li = (
+        p_to_li
+        / jnp.maximum(p_to_li_distance, eps)
+    )
 
     f_probe = shift_fn(
         r_p,
-        r_pf_target * direction,
+        r_pf_target * direction_to_li,
     )
 
-    return R.at[leave_F].set(f_probe)
+    geometry_is_valid = p_to_li_distance > r_pf_target
+
+    new_f = jnp.where(
+        geometry_is_valid,
+        f_probe,
+        r_f,
+    )
+
+    return R.at[leave_F].set(new_f)
 
 def propose_reaction_trial(
     sys: SystemState,
