@@ -508,7 +508,6 @@ def maybe_react_one_event(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_pf_probe: float,
     beta: float,
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
@@ -611,14 +610,6 @@ def maybe_react_one_event(
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
     P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-#    R_probe = make_probe_geometry(
-#        R,
-#        P_atom=P_atom,
-#        leave_F=cand.leave_F,
-#        disp_fn=ff.disp_fn,
-#        shift_fn=shift_fn,
-#        r_pf_probe=r_pf_probe,
-#    )
 
     R_probe = prepare_probe_geometry(
         R,
@@ -712,7 +703,6 @@ def maybe_react_rate_events(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_pf_probe: float,
     reaction_rate_ps: float | None,
     activation_energy_eV: float | None,
     temperature_k: float,
@@ -820,14 +810,6 @@ def maybe_react_rate_events(
         ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-        #R_probe = make_probe_geometry(
-        #    R_current,
-        #    P_atom=P_atom,
-        #    leave_F=cand.leave_F,
-        #    disp_fn=ff_current.disp_fn,
-        #    shift_fn=shift_fn,
-        #    r_pf_probe=r_pf_probe,
-        #)
        
         R_probe = prepare_probe_geometry(
             R,
