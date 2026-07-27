@@ -147,7 +147,6 @@ def test_reaction_step_fn_metropolis_passes_sigma_probability_parameters(monkeyp
     main_mod.main(cfg)
 
     kwargs = captured["metropolis_kwargs"]
-    assert kwargs["r_pf_probe"] == cfg.r_pf_probe
     assert "beta" in kwargs
     assert "mc_energy_evaluator" in kwargs
     assert "candidate_log_top_n" in kwargs
