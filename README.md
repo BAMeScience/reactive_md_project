@@ -162,7 +162,6 @@ reactive-md \
   --sigma-width 0.2
 ```
 
-`r_pf_probe` is not a reaction gate. It is only used after a reaction has been accepted to move the leaving F away from P before product-side FIRE relaxation.
 
 ---
 

@@ -243,30 +243,6 @@ def _candidate_info(cand: ReactionCandidate) -> dict:
     }
 
 
-def make_probe_geometry(
-    R,
-    *,
-    P_atom: int,
-    leave_F: int,
-    disp_fn,
-    shift_fn,
-    r_pf_probe: float = 4.0,
-):
-    """Set the minimum-image P-F separation to r_pf_probe."""
-
-    rP = R[P_atom]
-    rF = R[leave_F]
-
-    PF_vec = disp_fn(rP, rF)
-    PF_dist = jnp.linalg.norm(PF_vec) + 1.0e-12
-    uPF = PF_vec / PF_dist
-
-    # Move F only by the required change in P-F distance.
-    drF = (r_pf_probe - PF_dist) * uPF
-    rF_new = shift_fn(rF, drF)
-
-    return R.at[leave_F].set(rF_new)
-
 def prepare_probe_geometry(
     R,
     *,
