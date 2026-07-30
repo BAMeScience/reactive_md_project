@@ -7,15 +7,15 @@ from reactive_md.reaction import (
     rate_probability_from_reaction_coordinate,
 )
 
-from reactive_md.reactions.lipf6 import reaction_coordinate
+from reactive_md.reactions import lipf6
 
 def test_reaction_coordinate_sign_convention():
-    assert reaction_coordinate(d_pf=1.6, d_lif=2.4) == pytest.approx(-0.8)
-    assert reaction_coordinate(d_pf=2.4, d_lif=1.6) == pytest.approx(0.8)
+    assert lipf6.reaction_coordinate(d_pf=1.6, d_lif=2.4) == pytest.approx(-0.8)
+    assert lipf6.reaction_coordinate(d_pf=2.4, d_lif=1.6) == pytest.approx(0.8)
 
 
 def test_reaction_coordinate_transition_region():
-    assert reaction_coordinate(d_pf=2.0, d_lif=2.0) == pytest.approx(0.0)
+    assert lipf6.reaction_coordinate(d_pf=2.0, d_lif=2.0) == pytest.approx(0.0)
 
 
 def test_reaction_probability_midpoint_is_half():

@@ -10,14 +10,7 @@ import jax.numpy as jnp
 from jax_md.minimize import fire_descent
 
 from .reactions.templates_pf5 import PF5Template, LiFTemplate
-from .reactions.lipf6 import (
-    ReactionCandidate,
-    discover_pf6_and_li,
-    embed_pf5_into_pf6,
-    find_reaction_candidates,
-    prepare_probe_geometry,
-    reaction_coordinate,
-)
+from .reactions import lipf6
 from .topology_opls import remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
@@ -138,14 +131,14 @@ def rate_probability_from_reaction_coordinate(
 
 
 def candidate_records_from_reaction_candidates(
-    candidates: list[ReactionCandidate],
+    candidates: list[lipf6.ReactionCandidate],
     *,
     top_n: int = 10,
 ) -> list[dict]:
     """Convert sigma-ranked candidates into dictionaries for logging."""
     records = []
     for rank, cand in enumerate(candidates[: int(top_n)]):
-        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
         records.append(
             {
                 "rank": int(rank),
@@ -160,8 +153,8 @@ def candidate_records_from_reaction_candidates(
     return records
 
 
-def _candidate_info(cand: ReactionCandidate) -> dict:
-    sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
+    sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
     return {
         "k_pf6": cand.k_pf6,
         "li_idx": cand.li_idx,
@@ -174,7 +167,7 @@ def _candidate_info(cand: ReactionCandidate) -> dict:
 
 def propose_reaction_trial(
     sys: SystemState,
-    cand: ReactionCandidate,
+    cand: lipf6.ReactionCandidate,
     *,
     pf6_atoms_np: np.ndarray,
     atom_types_np: np.ndarray,
@@ -258,7 +251,7 @@ def propose_reaction_trial(
         pf6_molid,
     )
 
-    pf5_glob, pf5_bonds_g, pf5_angles_g = embed_pf5_into_pf6(
+    pf5_glob, pf5_bonds_g, pf5_angles_g = lipf6.embed_pf5_into_pf6(
         pf6_atoms_np[k_pf6],
         leave_F,
         pf5_bond_idx_local=pf5.bond_idx_local,
@@ -401,7 +394,7 @@ def maybe_react_one_event(
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     atom_types_np = np.array(atom_types)
 
-    candidates = find_reaction_candidates(
+    candidates = lipf6.find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
@@ -429,7 +422,7 @@ def maybe_react_one_event(
         "leave_F": cand.leave_F,
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
-        "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
+        "sigma": lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
     }
 
     sigma = candidate_info["sigma"]
@@ -493,7 +486,7 @@ def maybe_react_one_event(
 
     P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=P_atom,
         leave_F=cand.leave_F,
@@ -612,7 +605,7 @@ def maybe_react_rate_events(
         prefactor_ps=prefactor_ps,
     )
 
-    candidates = find_reaction_candidates(
+    candidates = lipf6.find_reaction_candidates(
         R,
         pf6_atoms_np,
         li_atoms_np,
@@ -655,7 +648,7 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
         p_react, k_eff, pf_factor = rate_probability_from_reaction_coordinate(
             sigma=sigma,
             base_rate_ps=base_rate_ps,
@@ -693,7 +686,7 @@ def maybe_react_rate_events(
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
        
-        R_probe = prepare_probe_geometry(
+        R_probe = lipf6.prepare_probe_geometry(
             R,
             P_atom=P_atom,
             leave_F=cand.leave_F,

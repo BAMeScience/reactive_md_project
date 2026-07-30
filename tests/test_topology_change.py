@@ -2,7 +2,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from reactive_md.reactions.lipf6  import prepare_probe_geometry
+from reactive_md.reactions import lipf6
 
 
 def _disp(a, b):
@@ -24,7 +24,7 @@ def test_prepare_probe_geometry_does_not_change_unrelated_atoms():
         dtype=jnp.float32,
     )
 
-    R_new = prepare_probe_geometry(
+    R_new = lipf6.prepare_probe_geometry(
         R,
         P_atom=0,
         leave_F=1,
@@ -101,7 +101,7 @@ def test_prepare_r_probe_moves_f_to_lj_target_toward_li():
         float(trial_sigmas[f_atom]),
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
@@ -173,7 +173,7 @@ def test_prepare_r_probe_handles_collinear_geometry():
         float(trial_sigmas[f_atom]),
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
@@ -232,7 +232,7 @@ def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
         dtype=jnp.float32,
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
