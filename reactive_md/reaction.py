@@ -208,7 +208,6 @@ def find_reaction_candidates(
     )
     return candidates
 
-
 def candidate_records_from_reaction_candidates(
     candidates: list[ReactionCandidate],
     *,
@@ -244,31 +243,52 @@ def _candidate_info(cand: ReactionCandidate) -> dict:
     }
 
 
-def make_probe_geometry(
+def prepare_probe_geometry(
     R,
     *,
     P_atom: int,
     leave_F: int,
+    li_idx: int,
+    sigma_p: float,
+    sigma_f: float,
     disp_fn,
     shift_fn,
-    r_pf_probe: float = 4.0,
+    eps: float = 1.0e-8,
 ):
-    """Move the leaving F away from P before product-side relaxation.
+    """Move the departing F from P toward the reacting Li."""
 
-    This is a geometry preparation step, not a reaction criterion.
-    """
-    rP = R[P_atom]
-    rF = R[leave_F]
+    r_p = R[P_atom]
+    r_f = R[leave_F]
+    r_li = R[li_idx]
 
-    PF_vec = disp_fn(rP, rF)
-    PF_dist = jnp.linalg.norm(PF_vec) + 1.0e-12
-    uPF = PF_vec / PF_dist
+    r_pf_target = (
+        2.0 ** (1.0 / 6.0)
+        * 0.5
+        * (sigma_p + sigma_f)
+    )
 
-    rF_new = rP + r_pf_probe * uPF
-    drF = rF_new - rF
+    p_to_li = disp_fn(r_p, r_li)
+    p_to_li_distance = jnp.linalg.norm(p_to_li)
 
-    return R.at[leave_F].set(shift_fn(rF, drF))
+    direction_to_li = (
+        p_to_li
+        / jnp.maximum(p_to_li_distance, eps)
+    )
 
+    f_probe = shift_fn(
+        r_p,
+        r_pf_target * direction_to_li,
+    )
+
+    geometry_is_valid = p_to_li_distance > r_pf_target
+
+    new_f = jnp.where(
+        geometry_is_valid,
+        f_probe,
+        r_f,
+    )
+
+    return R.at[leave_F].set(new_f)
 
 def propose_reaction_trial(
     sys: SystemState,
@@ -488,7 +508,6 @@ def maybe_react_one_event(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_pf_probe: float,
     beta: float,
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
@@ -591,13 +610,16 @@ def maybe_react_one_event(
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
     P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-    R_probe = make_probe_geometry(
+
+    R_probe = prepare_probe_geometry(
         R,
         P_atom=P_atom,
         leave_F=cand.leave_F,
-        disp_fn=ff.disp_fn,
+        li_idx=cand.li_idx,
+        sigma_p=float(trial["sigmas"][P_atom]),
+        sigma_f=float(trial["sigmas"][cand.leave_F]),
+        disp_fn=ff_trial.disp_fn,
         shift_fn=shift_fn,
-        r_pf_probe=r_pf_probe,
     )
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
@@ -681,7 +703,6 @@ def maybe_react_rate_events(
     p_type: int,
     f_type: int,
     li_type: int,
-    r_pf_probe: float,
     reaction_rate_ps: float | None,
     activation_energy_eV: float | None,
     temperature_k: float,
@@ -789,13 +810,16 @@ def maybe_react_rate_events(
         ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-        R_probe = make_probe_geometry(
-            R_current,
+       
+        R_probe = prepare_probe_geometry(
+            R,
             P_atom=P_atom,
             leave_F=cand.leave_F,
-            disp_fn=ff_current.disp_fn,
+            li_idx=cand.li_idx,
+            sigma_p=float(trial["sigmas"][P_atom]),
+            sigma_f=float(trial["sigmas"][cand.leave_F]),
+            disp_fn=ff_trial.disp_fn,
             shift_fn=shift_fn,
-            r_pf_probe=r_pf_probe,
         )
 
         R_relaxed, _nlist_relaxed = fire_relax_with_nlist(

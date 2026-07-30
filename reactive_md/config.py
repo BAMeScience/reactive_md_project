@@ -13,11 +13,6 @@ class SimConfig:
     check_every: int = 100
     max_events: int = 9999
 
-    # Product-geometry preparation after an accepted reaction.
-    # This is not a reaction gate; it only moves the leaving F away from P
-    # before local relaxation of the product topology.
-    r_pf_probe: float = 4.0 # controls how far the leaving F is moved away from P before relaxation.
-
     # Sigma-only reaction coordinate parameters.
     # sigma = d(P-F) - d(Li-F)
     # sigma_mid is the midpoint of the sigmoid reaction probability.

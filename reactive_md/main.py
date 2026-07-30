@@ -252,7 +252,6 @@ def main(cfg: SimConfig):
                 p_type=cfg.p_type,
                 f_type=cfg.f_type,
                 li_type=cfg.li_type,
-                r_pf_probe=cfg.r_pf_probe,
                 sigma_mid=cfg.sigma_mid,
                 sigma_width=cfg.sigma_width,
                 reaction_rate_ps=cfg.reaction_rate_ps,
@@ -279,7 +278,6 @@ def main(cfg: SimConfig):
             p_type=cfg.p_type,
             f_type=cfg.f_type,
             li_type=cfg.li_type,
-            r_pf_probe=cfg.r_pf_probe,
             beta=beta,
             sigma_mid=cfg.sigma_mid,
             sigma_width=cfg.sigma_width,
@@ -333,7 +331,6 @@ def cli():
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--check-every", type=int, default=None)
 
-    parser.add_argument("--r-pf-probe", type=float, default=None)
     parser.add_argument("--sigma-mid", type=float, default=default_cfg.sigma_mid)
     parser.add_argument("--sigma-width", type=float, default=default_cfg.sigma_width)
 
@@ -422,7 +419,6 @@ def cli():
         settings_file=str(Path(args.settings).expanduser().resolve()),
         steps=args.steps if args.steps is not None else default_cfg.steps,
         check_every=args.check_every if args.check_every is not None else default_cfg.check_every,
-        r_pf_probe=args.r_pf_probe if args.r_pf_probe is not None else default_cfg.r_pf_probe,
         sigma_mid=args.sigma_mid,
         sigma_width=args.sigma_width,
         reaction_mode=args.reaction_mode,
