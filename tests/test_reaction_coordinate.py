@@ -3,11 +3,11 @@ import math
 import pytest
 
 from reactive_md.reaction import (
-    reaction_coordinate,
     reaction_probability,
     rate_probability_from_reaction_coordinate,
 )
 
+from reactive_md.reactions.lipf6 import reaction_coordinate
 
 def test_reaction_coordinate_sign_convention():
     assert reaction_coordinate(d_pf=1.6, d_lif=2.4) == pytest.approx(-0.8)

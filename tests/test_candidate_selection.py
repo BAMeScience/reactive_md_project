@@ -3,12 +3,14 @@ import jax.numpy as jnp
 import pytest
 
 from reactive_md.reaction import (
+    candidate_records_from_reaction_candidates
+)
+
+from reactive_md.reactions.lipf6 import (
     ReactionCandidate,
-    candidate_records_from_reaction_candidates,
     find_reaction_candidates,
     reaction_coordinate,
 )
-
 
 def _disp(a, b):
     return b - a

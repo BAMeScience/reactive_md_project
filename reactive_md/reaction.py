@@ -10,7 +10,14 @@ import jax.numpy as jnp
 from jax_md.minimize import fire_descent
 
 from .reactions.templates_pf5 import PF5Template, LiFTemplate
-from .reactions.lipf6 import embed_pf5_into_pf6
+from .reactions.lipf6 import (
+    ReactionCandidate,
+    discover_pf6_and_li,
+    embed_pf5_into_pf6,
+    find_reaction_candidates,
+    prepare_probe_geometry,
+    reaction_coordinate,
+)
 from .topology_opls import remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
@@ -75,37 +82,6 @@ class SystemState:
     molecule_id: Any
     pf6_reacted: Any
 
-
-@dataclass(frozen=True)
-class ReactionCandidate:
-    """One possible PF6 -> PF5 + Li/F reaction event."""
-
-    k_pf6: int
-    li_idx: int
-    leave_F: int
-    d_lif: float
-    d_pf: float
-
-
-def _distance(disp_fn, Rj, i: int, j: int) -> float:
-    dr = np.asarray(disp_fn(Rj[int(i)], Rj[int(j)]))
-    return float(np.linalg.norm(dr))
-
-
-def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
-
-    """
-    Reaction coordinate from Fattebert et al. Journal of The Electrochemical Society, 2024 171 080505 for LiPF6 decomposition.
-
-    σ = d(P–F) - d(Li–F)
-
-    σ < 0 : reactant-like configuration
-    σ ≈ 0 : transition region
-    σ > 0 : product-like configuration
-    """
-    return float(d_pf - d_lif)
-
-
 def reaction_probability(
     sigma: float,
     *,
@@ -159,54 +135,7 @@ def rate_probability_from_reaction_coordinate(
     return p_react, k_eff_ps, sigma_factor
 
 
-def find_reaction_candidates(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
-    *,
-    pf6_reacted_np: np.ndarray,
-) -> list[ReactionCandidate]:
-    """Return all possible reaction candidates, ranked by sigma.
 
-    Every unreacted PF6 fluorine and every Li ion is considered. No independent
-    Li-F or P-F hard cutoff is used. The only ordering variable is
-
-        sigma = d(P-F) - d(Li-F)
-    """
-    Rj = jnp.asarray(R)
-    candidates: list[ReactionCandidate] = []
-
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                candidates.append(
-                    ReactionCandidate(
-                        k_pf6=int(k),
-                        li_idx=li_idx,
-                        leave_F=f_idx,
-                        d_lif=float(d_lif),
-                        d_pf=float(d_pf),
-                    )
-                )
-
-    candidates.sort(
-        key=lambda c: reaction_coordinate(d_pf=c.d_pf, d_lif=c.d_lif),
-        reverse=True,
-    )
-    return candidates
 
 def candidate_records_from_reaction_candidates(
     candidates: list[ReactionCandidate],
@@ -242,53 +171,6 @@ def _candidate_info(cand: ReactionCandidate) -> dict:
         "sigma": sigma,
     }
 
-
-def prepare_probe_geometry(
-    R,
-    *,
-    P_atom: int,
-    leave_F: int,
-    li_idx: int,
-    sigma_p: float,
-    sigma_f: float,
-    disp_fn,
-    shift_fn,
-    eps: float = 1.0e-8,
-):
-    """Move the departing F from P toward the reacting Li."""
-
-    r_p = R[P_atom]
-    r_f = R[leave_F]
-    r_li = R[li_idx]
-
-    r_pf_target = (
-        2.0 ** (1.0 / 6.0)
-        * 0.5
-        * (sigma_p + sigma_f)
-    )
-
-    p_to_li = disp_fn(r_p, r_li)
-    p_to_li_distance = jnp.linalg.norm(p_to_li)
-
-    direction_to_li = (
-        p_to_li
-        / jnp.maximum(p_to_li_distance, eps)
-    )
-
-    f_probe = shift_fn(
-        r_p,
-        r_pf_target * direction_to_li,
-    )
-
-    geometry_is_valid = p_to_li_distance > r_pf_target
-
-    new_f = jnp.where(
-        geometry_is_valid,
-        f_probe,
-        r_f,
-    )
-
-    return R.at[leave_F].set(new_f)
 
 def propose_reaction_trial(
     sys: SystemState,

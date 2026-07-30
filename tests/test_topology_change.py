@@ -2,7 +2,7 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from reactive_md.reaction import prepare_probe_geometry
+from reactive_md.reactions.lipf6  import prepare_probe_geometry
 
 
 def _disp(a, b):
@@ -51,11 +51,6 @@ def _free_space_functions():
         return r + dr
 
     return disp_fn, shift_fn
-
-import jax.numpy as jnp
-import pytest
-
-from reactive_md.reaction import prepare_probe_geometry
 
 
 def _free_space_functions():
