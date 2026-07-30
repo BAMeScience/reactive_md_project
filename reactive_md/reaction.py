@@ -249,8 +249,6 @@ def maybe_react_one_event(
     candidate_log_top_n: int = 10,
 ):
 
-    pf6_atoms_np = reaction.pf6_atoms
-    li_atoms_np = reaction.li_atoms
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
 
     candidates = reaction.find_candidates(
@@ -430,8 +428,6 @@ def maybe_react_rate_events(
     reaction_probability().
     """
     
-    pf6_atoms_np = reaction.pf6_atoms
-    li_atoms_np = reaction.li_atoms
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     base_rate_ps = resolve_rate_ps(
         reaction_rate_ps=reaction_rate_ps,
@@ -509,10 +505,8 @@ def maybe_react_rate_events(
 
         ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
 
-        P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-       
         R_probe = reaction.prepare_probe(
-            R,
+            R_current,
             cand,
             sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
             sigma_f=float(trial["sigmas"][cand.leave_F]),

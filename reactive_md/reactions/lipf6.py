@@ -25,7 +25,7 @@ class ReactionCandidate:
 
 @dataclass
 class LiPF6Reaction:
-    """Definition and immutable topology data for LiPF6 decomposition.
+    """Reaction-definition data for LiPF6 decomposition.
 
     The object owns the information needed to describe the reaction
 
