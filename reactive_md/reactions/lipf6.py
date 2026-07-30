@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as np
+
+from .templates_pf5 import LiFTemplate, PF5Template
 
 
 @dataclass(frozen=True)
@@ -19,13 +22,265 @@ class ReactionCandidate:
     d_pf: float
 
 
-def _distance(disp_fn, Rj, i: int, j: int) -> float:
+@dataclass
+class LiPF6Reaction:
+    """Definition and immutable topology data for LiPF6 decomposition.
+
+    The object owns the information needed to describe the reaction
+
+        LiPF6 -> PF5 + LiF
+
+    but does not own the dynamically changing system state. In particular,
+    the array tracking which PF6 molecules have reacted should remain part
+    of the simulation state for now.
+
+    Parameters
+    ----------
+    pf6_atoms
+        Integer array of shape ``(n_pf6, 7)``. Each row contains the global
+        atom indices ``[P, F1, F2, F3, F4, F5, F6]``.
+
+    li_atoms
+        Integer array of shape ``(n_li,)`` containing global Li indices.
+
+    atom_types
+        Integer atom-type array for the complete system.
+
+    pf5
+        Product-side PF5 topology and nonbonded-parameter template.
+
+    lif
+        Product-side LiF nonbonded-parameter template.
+
+    p_type, f_type, li_type
+        Atom-type identifiers used for sanity checks during trial creation.
+    """
+
+    pf6_atoms: np.ndarray
+    li_atoms: np.ndarray
+    atom_types: np.ndarray
+
+    pf5: PF5Template
+    lif: LiFTemplate
+
+    p_type: int
+    f_type: int
+    li_type: int
+
+    def __post_init__(self) -> None:
+        """Normalize arrays and validate their basic shapes."""
+        self.pf6_atoms = np.asarray(
+            self.pf6_atoms,
+            dtype=np.int32,
+        )
+        self.li_atoms = np.asarray(
+            self.li_atoms,
+            dtype=np.int32,
+        )
+        self.atom_types = np.asarray(self.atom_types)
+
+        if self.pf6_atoms.ndim != 2 or self.pf6_atoms.shape[1] != 7:
+            raise ValueError(
+                "pf6_atoms must have shape (n_pf6, 7), with rows "
+                "[P, F1, F2, F3, F4, F5, F6]."
+            )
+
+        if self.li_atoms.ndim != 1:
+            raise ValueError("li_atoms must be a one-dimensional array.")
+
+        if self.atom_types.ndim != 1:
+            raise ValueError("atom_types must be a one-dimensional array.")
+
+        if self.atom_types.size:
+            all_reaction_indices = np.concatenate(
+                [
+                    self.pf6_atoms.reshape(-1),
+                    self.li_atoms,
+                ]
+            )
+
+            if all_reaction_indices.size:
+                minimum_index = int(all_reaction_indices.min())
+                maximum_index = int(all_reaction_indices.max())
+
+                if minimum_index < 0:
+                    raise ValueError(
+                        "Reaction atom indices must be non-negative."
+                    )
+
+                if maximum_index >= self.atom_types.shape[0]:
+                    raise ValueError(
+                        "Reaction atom index exceeds the atom_types array."
+                    )
+
+    @classmethod
+    def from_system(
+        cls,
+        atom_types,
+        molecule_id,
+        *,
+        pf5: PF5Template,
+        lif: LiFTemplate,
+        p_type: int,
+        f_type: int,
+        li_type: int,
+    ) -> LiPF6Reaction:
+        """Discover PF6/Li atoms and construct the reaction definition."""
+        atom_types_np = np.asarray(atom_types)
+
+        pf6_atoms, li_atoms = discover_pf6_and_li(
+            atom_types_np,
+            molecule_id,
+            p_type=p_type,
+            f_type=f_type,
+            li_type=li_type,
+        )
+
+        return cls(
+            pf6_atoms=pf6_atoms,
+            li_atoms=li_atoms,
+            atom_types=atom_types_np,
+            pf5=pf5,
+            lif=lif,
+            p_type=int(p_type),
+            f_type=int(f_type),
+            li_type=int(li_type),
+        )
+
+    def find_candidates(
+        self,
+        R,
+        disp_fn,
+        *,
+        pf6_reacted,
+    ) -> list[ReactionCandidate]:
+        """Return reaction candidates using data owned by this object."""
+        return find_reaction_candidates(
+            R,
+            self.pf6_atoms,
+            self.li_atoms,
+            disp_fn,
+            pf6_reacted_np=np.asarray(
+                pf6_reacted,
+                dtype=bool,
+            ),
+        )
+
+    def phosphorus_index(
+        self,
+        candidate: ReactionCandidate,
+    ) -> int:
+        """Return the phosphorus index associated with a candidate."""
+        self._validate_candidate(candidate)
+        return int(self.pf6_atoms[candidate.k_pf6, 0])
+
+    def candidate_types_are_valid(
+        self,
+        candidate: ReactionCandidate,
+    ) -> bool:
+        """Check that a candidate has the expected P, F, and Li atom types."""
+        self._validate_candidate(candidate)
+
+        phosphorus = self.phosphorus_index(candidate)
+
+        return bool(
+            self.atom_types[phosphorus] == self.p_type
+            and self.atom_types[candidate.leave_F] == self.f_type
+            and self.atom_types[candidate.li_idx] == self.li_type
+        )
+
+    def embed_pf5(
+        self,
+        candidate: ReactionCandidate,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Embed the PF5 template for a selected reaction candidate."""
+        self._validate_candidate(candidate)
+
+        return embed_pf5_into_pf6(
+            self.pf6_atoms[candidate.k_pf6],
+            candidate.leave_F,
+            pf5_bond_idx_local=self.pf5.bond_idx_local,
+            pf5_angle_idx_local=self.pf5.angle_idx_local,
+        )
+
+    def prepare_probe(
+        self,
+        R,
+        candidate: ReactionCandidate,
+        *,
+        sigma_p: float,
+        sigma_f: float,
+        disp_fn,
+        shift_fn,
+        eps: float = 1.0e-8,
+    ):
+        """Construct the product-side probe geometry for a candidate."""
+        phosphorus = self.phosphorus_index(candidate)
+
+        return prepare_probe_geometry(
+            R,
+            P_atom=phosphorus,
+            leave_F=candidate.leave_F,
+            li_idx=candidate.li_idx,
+            sigma_p=sigma_p,
+            sigma_f=sigma_f,
+            disp_fn=disp_fn,
+            shift_fn=shift_fn,
+            eps=eps,
+        )
+
+    def _validate_candidate(
+        self,
+        candidate: ReactionCandidate,
+    ) -> None:
+        """Validate candidate indices against this reaction definition."""
+        if not isinstance(candidate, ReactionCandidate):
+            raise TypeError(
+                "candidate must be a lipf6.ReactionCandidate instance."
+            )
+
+        if not 0 <= candidate.k_pf6 < self.pf6_atoms.shape[0]:
+            raise IndexError(
+                f"PF6 index {candidate.k_pf6} is outside the available "
+                f"range 0..{self.pf6_atoms.shape[0] - 1}."
+            )
+
+        pf6_row = self.pf6_atoms[candidate.k_pf6]
+
+        if candidate.leave_F not in pf6_row[1:]:
+            raise ValueError(
+                "The candidate's leaving fluorine does not belong to "
+                "the selected PF6 molecule."
+            )
+
+        if candidate.li_idx not in self.li_atoms:
+            raise ValueError(
+                "The candidate's Li index is not part of this reaction "
+                "definition."
+            )
+
+
+def _distance(
+    disp_fn,
+    Rj,
+    i: int,
+    j: int,
+) -> float:
     """Return the minimum-image distance between atoms i and j."""
-    dr = np.asarray(disp_fn(Rj[int(i)], Rj[int(j)]))
-    return float(np.linalg.norm(dr))
+    displacement = np.asarray(
+        disp_fn(
+            Rj[int(i)],
+            Rj[int(j)],
+        )
+    )
+    return float(np.linalg.norm(displacement))
 
 
-def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
+def reaction_coordinate(
+    *,
+    d_pf: float,
+    d_lif: float,
+) -> float:
     """Return the LiPF6 decomposition reaction coordinate.
 
     Based on Fattebert et al., Journal of The Electrochemical Society,
@@ -33,13 +288,13 @@ def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
 
         sigma = d(P-F) - d(Li-F)
 
-    sigma < 0:
+    sigma < 0
         Reactant-like configuration.
 
-    sigma approximately 0:
+    sigma approximately 0
         Transition region.
 
-    sigma > 0:
+    sigma > 0
         Product-like configuration.
     """
     return float(d_pf - d_lif)
@@ -55,48 +310,81 @@ def find_reaction_candidates(
 ) -> list[ReactionCandidate]:
     """Return all possible reaction candidates, ranked by sigma.
 
-    Every fluorine belonging to an unreacted PF6 molecule is paired with every
-    Li ion. No independent Li-F or P-F hard cutoff is applied.
+    Every fluorine belonging to an unreacted PF6 molecule is paired with
+    every Li ion. No independent Li-F or P-F hard cutoff is applied.
 
     Candidates are ranked by
 
         sigma = d(P-F) - d(Li-F)
 
     in descending order.
+
+    This free function is retained for compatibility with the current
+    reaction engine. New code may use ``LiPF6Reaction.find_candidates()``.
     """
+    pf6_atoms_np = np.asarray(
+        pf6_atoms_np,
+        dtype=np.int32,
+    )
+    li_atoms_np = np.asarray(
+        li_atoms_np,
+        dtype=np.int32,
+    )
+    pf6_reacted_np = np.asarray(
+        pf6_reacted_np,
+        dtype=bool,
+    )
+
+    if pf6_atoms_np.ndim != 2 or pf6_atoms_np.shape[1] != 7:
+        raise ValueError(
+            "pf6_atoms_np must have shape (n_pf6, 7)."
+        )
+
+    if li_atoms_np.ndim != 1:
+        raise ValueError(
+            "li_atoms_np must be one-dimensional."
+        )
+
+    if pf6_reacted_np.shape != (pf6_atoms_np.shape[0],):
+        raise ValueError(
+            "pf6_reacted_np must contain one boolean value per PF6 "
+            "molecule."
+        )
+
     Rj = jnp.asarray(R)
     candidates: list[ReactionCandidate] = []
 
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
+    for k_pf6 in range(pf6_atoms_np.shape[0]):
+        if pf6_reacted_np[k_pf6]:
             continue
 
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
+        phosphorus = int(pf6_atoms_np[k_pf6, 0])
+        fluorines = pf6_atoms_np[k_pf6, 1:]
 
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
+        for li_atom in li_atoms_np:
+            li_idx = int(li_atom)
+
+            for fluorine in fluorines:
+                fluorine_idx = int(fluorine)
 
                 d_lif = _distance(
                     disp_fn,
                     Rj,
                     li_idx,
-                    f_idx,
+                    fluorine_idx,
                 )
                 d_pf = _distance(
                     disp_fn,
                     Rj,
-                    P_atom,
-                    f_idx,
+                    phosphorus,
+                    fluorine_idx,
                 )
 
                 candidates.append(
                     ReactionCandidate(
-                        k_pf6=int(k),
+                        k_pf6=int(k_pf6),
                         li_idx=li_idx,
-                        leave_F=f_idx,
+                        leave_F=fluorine_idx,
                         d_lif=d_lif,
                         d_pf=d_pf,
                     )
@@ -125,23 +413,50 @@ def prepare_probe_geometry(
     shift_fn,
     eps: float = 1.0e-8,
 ):
-    """Move the departing F from P toward the reacting Li."""
-    r_p = R[P_atom]
-    r_f = R[leave_F]
-    r_li = R[li_idx]
+    """Move the departing F from P toward the reacting Li.
+
+    The target P-F separation is the Lennard-Jones equilibrium distance
+    derived from Lorentz-mixed P and F sigma values:
+
+        r_target = 2**(1/6) * (sigma_p + sigma_f) / 2
+
+    If the P-Li distance is not larger than that target distance, the
+    original F position is retained.
+    """
+    if eps <= 0.0:
+        raise ValueError("eps must be positive.")
+
+    Rj = jnp.asarray(R)
+
+    phosphorus = int(P_atom)
+    fluorine = int(leave_F)
+    lithium = int(li_idx)
+
+    r_p = Rj[phosphorus]
+    r_f = Rj[fluorine]
+    r_li = Rj[lithium]
 
     r_pf_target = (
         2.0 ** (1.0 / 6.0)
         * 0.5
-        * (sigma_p + sigma_f)
+        * (float(sigma_p) + float(sigma_f))
     )
+
+    if not np.isfinite(r_pf_target) or r_pf_target <= 0.0:
+        raise ValueError(
+            "The force-field-derived P-F target distance must be "
+            "finite and positive."
+        )
 
     p_to_li = disp_fn(r_p, r_li)
     p_to_li_distance = jnp.linalg.norm(p_to_li)
 
     direction_to_li = (
         p_to_li
-        / jnp.maximum(p_to_li_distance, eps)
+        / jnp.maximum(
+            p_to_li_distance,
+            jnp.asarray(eps, dtype=p_to_li_distance.dtype),
+        )
     )
 
     f_probe = shift_fn(
@@ -157,7 +472,7 @@ def prepare_probe_geometry(
         r_f,
     )
 
-    return R.at[leave_F].set(new_f)
+    return Rj.at[fluorine].set(new_f)
 
 
 def discover_pf6_and_li(
@@ -182,31 +497,65 @@ def discover_pf6_and_li(
     atom_types_np = np.asarray(atom_types)
     molecule_id_np = np.asarray(molecule_id)
 
+    if atom_types_np.ndim != 1:
+        raise ValueError("atom_types must be one-dimensional.")
+
+    if molecule_id_np.ndim != 1:
+        raise ValueError("molecule_id must be one-dimensional.")
+
+    if atom_types_np.shape[0] != molecule_id_np.shape[0]:
+        raise ValueError(
+            "atom_types and molecule_id must contain the same number "
+            "of atoms."
+        )
+
     pf6_blocks: list[np.ndarray] = []
 
     for molecule in np.unique(molecule_id_np):
-        indices = np.where(molecule_id_np == molecule)[0]
+        indices = np.where(
+            molecule_id_np == molecule
+        )[0]
+
         molecule_types = atom_types_np[indices]
 
-        p_indices = indices[molecule_types == p_type]
-        f_indices = indices[molecule_types == f_type]
+        phosphorus_indices = indices[
+            molecule_types == p_type
+        ]
+        fluorine_indices = indices[
+            molecule_types == f_type
+        ]
 
-        if p_indices.size == 1 and f_indices.size == 6:
-            P_atom = int(p_indices[0])
-            fluorines = np.sort(f_indices).astype(np.int32)
+        if (
+            phosphorus_indices.size == 1
+            and fluorine_indices.size == 6
+        ):
+            phosphorus = int(phosphorus_indices[0])
+            fluorines = np.sort(
+                fluorine_indices
+            ).astype(np.int32)
 
             block = np.concatenate(
                 [
-                    np.array([P_atom], dtype=np.int32),
+                    np.asarray(
+                        [phosphorus],
+                        dtype=np.int32,
+                    ),
                     fluorines,
                 ]
             )
+
             pf6_blocks.append(block)
 
     if pf6_blocks:
-        pf6_atoms = np.stack(pf6_blocks).astype(np.int32)
+        pf6_atoms = np.stack(
+            pf6_blocks,
+            axis=0,
+        ).astype(np.int32)
     else:
-        pf6_atoms = np.empty((0, 7), dtype=np.int32)
+        pf6_atoms = np.empty(
+            (0, 7),
+            dtype=np.int32,
+        )
 
     li_atoms = np.where(
         atom_types_np == li_type
@@ -228,31 +577,72 @@ def embed_pf5_into_pf6(
     pf5_angle_idx_local: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Map PF5-local topology indices onto a PF6 atom block."""
-    P_atom = int(pf6_atoms_row[0])
-    fluorines = [int(index) for index in pf6_atoms_row[1:]]
+    pf6_atoms_row = np.asarray(
+        pf6_atoms_row,
+        dtype=np.int32,
+    )
+
+    if pf6_atoms_row.shape != (7,):
+        raise ValueError(
+            "pf6_atoms_row must contain exactly seven indices: "
+            "[P, F1, F2, F3, F4, F5, F6]."
+        )
+
+    phosphorus = int(pf6_atoms_row[0])
+    fluorines = [
+        int(index)
+        for index in pf6_atoms_row[1:]
+    ]
     leave_F = int(leave_F)
 
     remaining_fluorines = [
-        f_idx
-        for f_idx in fluorines
-        if f_idx != leave_F
+        fluorine
+        for fluorine in fluorines
+        if fluorine != leave_F
     ]
 
     if len(remaining_fluorines) != 5:
         raise ValueError(
-            "leave_F is not one of the six fluorines in this PF6 block."
+            "leave_F is not exactly one of the six fluorines in this "
+            "PF6 block."
         )
 
     pf5_global = np.asarray(
-        [P_atom, *remaining_fluorines],
+        [
+            phosphorus,
+            *remaining_fluorines,
+        ],
         dtype=np.int32,
     )
 
-    bonds_global = pf5_global[
-        np.asarray(pf5_bond_idx_local, dtype=np.int32)
-    ]
-    angles_global = pf5_global[
-        np.asarray(pf5_angle_idx_local, dtype=np.int32)
-    ]
+    bond_indices_local = np.asarray(
+        pf5_bond_idx_local,
+        dtype=np.int32,
+    )
+    angle_indices_local = np.asarray(
+        pf5_angle_idx_local,
+        dtype=np.int32,
+    )
+
+    if bond_indices_local.size:
+        if (
+            int(bond_indices_local.min()) < 0
+            or int(bond_indices_local.max()) >= pf5_global.size
+        ):
+            raise IndexError(
+                "PF5 local bond indices must lie between 0 and 5."
+            )
+
+    if angle_indices_local.size:
+        if (
+            int(angle_indices_local.min()) < 0
+            or int(angle_indices_local.max()) >= pf5_global.size
+        ):
+            raise IndexError(
+                "PF5 local angle indices must lie between 0 and 5."
+            )
+
+    bonds_global = pf5_global[bond_indices_local]
+    angles_global = pf5_global[angle_indices_local]
 
     return pf5_global, bonds_global, angles_global

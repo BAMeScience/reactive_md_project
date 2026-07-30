@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 from jax_md.minimize import fire_descent
 
-from .reactions.templates_pf5 import PF5Template, LiFTemplate
 from .reactions import lipf6
 from .topology_opls import remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
@@ -166,21 +165,16 @@ def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
 
 
 def propose_reaction_trial(
-    sys: SystemState,
-    cand: lipf6.ReactionCandidate,
+    sys,
+    cand,
     *,
-    pf6_atoms_np: np.ndarray,
-    atom_types_np: np.ndarray,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
+    reaction: lipf6.LiPF6Reaction,
 ):
     k_pf6 = cand.k_pf6
     li_idx = cand.li_idx
     leave_F = cand.leave_F
 
+    pf6_atoms_np = reaction.pf6_atoms
     P_atom = int(pf6_atoms_np[k_pf6, 0])
 
     if (
@@ -375,25 +369,17 @@ def maybe_react_one_event(
     shift_fn,
     ff: FFBundle,
     sys: SystemState,
-    pf6_atoms,
-    li_atoms,
-    atom_types,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
+    reaction: lipf6.LiPF6Reaction,
     beta: float,
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
 ):
-    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
-    li_atoms_np = np.array(li_atoms, dtype=np.int32)
-    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    atom_types_np = np.array(atom_types)
 
+    pf6_atoms_np = reaction.pf6_atoms
+    li_atoms_np = reaction.li_atoms
+    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
     candidates = lipf6.find_reaction_candidates(
         R,
         pf6_atoms_np,
@@ -461,13 +447,7 @@ def maybe_react_one_event(
     trial, _pf6_molid = propose_reaction_trial(
         sys,
         cand,
-        pf6_atoms_np=pf6_atoms_np,
-        atom_types_np=atom_types_np,
-        pf5=pf5,
-        lif=lif,
-        p_type=p_type,
-        f_type=f_type,
-        li_type=li_type,
+        reaction=reaction,
     )
 
     if trial is None:
@@ -570,14 +550,7 @@ def maybe_react_rate_events(
     shift_fn,
     ff: FFBundle,
     sys: SystemState,
-    pf6_atoms,
-    li_atoms,
-    atom_types,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
+    reaction: lipf6.LiPF6Reaction,
     reaction_rate_ps: float | None,
     activation_energy_eV: float | None,
     temperature_k: float,
@@ -593,11 +566,10 @@ def maybe_react_rate_events(
     In rate mode, sigma contributes to the effective rate via
     reaction_probability().
     """
-    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
-    li_atoms_np = np.array(li_atoms, dtype=np.int32)
+    
+    pf6_atoms_np = reaction.pf6_atoms
+    li_atoms_np = reaction.li_atoms
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    atom_types_np = np.array(atom_types)
-
     base_rate_ps = resolve_rate_ps(
         reaction_rate_ps=reaction_rate_ps,
         activation_energy_eV=activation_energy_eV,
@@ -687,7 +659,7 @@ def maybe_react_rate_events(
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
        
         R_probe = lipf6.prepare_probe_geometry(
-            R,
+            R_current,
             P_atom=P_atom,
             leave_F=cand.leave_F,
             li_idx=cand.li_idx,
