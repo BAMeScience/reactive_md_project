@@ -252,14 +252,13 @@ def maybe_react_one_event(
     pf6_atoms_np = reaction.pf6_atoms
     li_atoms_np = reaction.li_atoms
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    candidates = lipf6.find_reaction_candidates(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        ff.disp_fn,
-        pf6_reacted_np=pf6_reacted_np,
-    )
 
+    candidates = reaction.find_candidates(
+        R,
+        ff.disp_fn,
+        pf6_reacted=pf6_reacted_np,
+    )
+    
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -332,14 +331,10 @@ def maybe_react_one_event(
 
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
-    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-
-    R_probe = lipf6.prepare_probe_geometry(
+    R_probe = reaction.prepare_probe(
         R,
-        P_atom=P_atom,
-        leave_F=cand.leave_F,
-        li_idx=cand.li_idx,
-        sigma_p=float(trial["sigmas"][P_atom]),
+        cand,
+        sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
         sigma_f=float(trial["sigmas"][cand.leave_F]),
         disp_fn=ff_trial.disp_fn,
         shift_fn=shift_fn,
@@ -445,13 +440,13 @@ def maybe_react_rate_events(
         prefactor_ps=prefactor_ps,
     )
 
-    candidates = lipf6.find_reaction_candidates(
+    
+    candidates = reaction.find_candidates(
         R,
-        pf6_atoms_np,
-        li_atoms_np,
         ff.disp_fn,
-        pf6_reacted_np=pf6_reacted_np,
+        pf6_reacted=pf6_reacted_np,
     )
+
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -507,7 +502,7 @@ def maybe_react_rate_events(
         if u >= p_react:
             continue
 
-        trial, _pf6_molid = reaction.build_trial(sys, cand)
+        trial, _pf6_molid = reaction.build_trial(sys_current, cand)
 
         if trial is None:
             continue
@@ -516,12 +511,10 @@ def maybe_react_rate_events(
 
         P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
        
-        R_probe = lipf6.prepare_probe_geometry(
-            R_current,
-            P_atom=P_atom,
-            leave_F=cand.leave_F,
-            li_idx=cand.li_idx,
-            sigma_p=float(trial["sigmas"][P_atom]),
+        R_probe = reaction.prepare_probe(
+            R,
+            cand,
+            sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
             sigma_f=float(trial["sigmas"][cand.leave_F]),
             disp_fn=ff_trial.disp_fn,
             shift_fn=shift_fn,
