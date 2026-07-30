@@ -164,134 +164,6 @@ def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
     }
 
 
-def propose_reaction_trial(
-    sys,
-    cand,
-    *,
-    reaction: lipf6.LiPF6Reaction,
-):
-    k_pf6 = cand.k_pf6
-    li_idx = cand.li_idx
-    leave_F = cand.leave_F
-
-    pf6_atoms_np = reaction.pf6_atoms
-    P_atom = int(pf6_atoms_np[k_pf6, 0])
-
-    if (
-        atom_types_np[P_atom] != p_type
-        or atom_types_np[leave_F] != f_type
-        or atom_types_np[li_idx] != li_type
-    ):
-        return None, None
-
-    bond_idx, k_b, r0 = (
-        np.array(sys.bonds[0], dtype=np.int32),
-        np.array(sys.bonds[1], dtype=np.float32),
-        np.array(sys.bonds[2], dtype=np.float32),
-    )
-
-    angle_idx, k_theta, theta0 = (
-        np.array(sys.angles[0], dtype=np.int32),
-        np.array(sys.angles[1], dtype=np.float32),
-        np.array(sys.angles[2], dtype=np.float32),
-    )
-
-    tors_idx, tors_k, tors_n, tors_gamma = (
-        np.array(sys.torsions[0], dtype=np.int32),
-        np.array(sys.torsions[1], dtype=np.float32),
-        np.array(sys.torsions[2], dtype=np.int32),
-        np.array(sys.torsions[3], dtype=np.float32),
-    )
-
-    impr_idx, impr_k, impr_n, impr_gamma = (
-        np.array(sys.impropers[0], dtype=np.int32),
-        np.array(sys.impropers[1], dtype=np.float32),
-        np.array(sys.impropers[2], dtype=np.int32),
-        np.array(sys.impropers[3], dtype=np.float32),
-    )
-
-    charges_np = np.array(sys.charges, dtype=np.float32)
-    sigmas_np = np.array(sys.sigmas, dtype=np.float32)
-    eps_np = np.array(sys.epsilons, dtype=np.float32)
-    molecule_id_np = np.array(sys.molecule_id, dtype=np.int32)
-
-    pf6_molid = int(molecule_id_np[P_atom])
-
-    bond_idx2, (k_b2, r0_2) = remove_terms_in_molid(
-        bond_idx,
-        [k_b, r0],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    angle_idx2, (k_th2, th0_2) = remove_terms_in_molid(
-        angle_idx,
-        [k_theta, theta0],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    tors_idx2, (tors_k2, tors_n2, tors_g2) = remove_terms_in_molid(
-        tors_idx,
-        [tors_k, tors_n, tors_gamma],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    impr_idx2, (impr_k2, impr_n2, impr_g2) = remove_terms_in_molid(
-        impr_idx,
-        [impr_k, impr_n, impr_gamma],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    pf5_glob, pf5_bonds_g, pf5_angles_g = lipf6.embed_pf5_into_pf6(
-        pf6_atoms_np[k_pf6],
-        leave_F,
-        pf5_bond_idx_local=pf5.bond_idx_local,
-        pf5_angle_idx_local=pf5.angle_idx_local,
-    )
-
-    bond_idx2 = np.concatenate([bond_idx2, pf5_bonds_g], axis=0)
-    k_b2 = np.concatenate([k_b2, pf5.k_b], axis=0)
-    r0_2 = np.concatenate([r0_2, pf5.r0], axis=0)
-
-    angle_idx2 = np.concatenate([angle_idx2, pf5_angles_g], axis=0)
-    k_th2 = np.concatenate([k_th2, pf5.k_theta], axis=0)
-    th0_2 = np.concatenate([th0_2, pf5.theta0], axis=0)
-
-    P_pf5 = int(pf5_glob[0])
-    Fs_pf5 = pf5_glob[1:]
-
-    charges_np[P_pf5] = pf5.q["P"]
-    charges_np[Fs_pf5] = pf5.q["F"]
-
-    eps_np[P_pf5], sigmas_np[P_pf5] = pf5.pair["P"]
-    eps_np[Fs_pf5], sigmas_np[Fs_pf5] = pf5.pair["F"]
-
-    charges_np[leave_F] = lif.nb["F"]["q"]
-    sigmas_np[leave_F] = lif.nb["F"]["sigma"]
-    eps_np[leave_F] = lif.nb["F"]["eps"]
-
-    charges_np[li_idx] = lif.nb["Li"]["q"]
-    sigmas_np[li_idx] = lif.nb["Li"]["sigma"]
-    eps_np[li_idx] = lif.nb["Li"]["eps"]
-
-    molecule_id2 = molecule_id_np.copy()
-    new_molid = int(molecule_id2.max()) + 1
-    molecule_id2[leave_F] = new_molid
-
-    return {
-        "bonds": (bond_idx2, k_b2, r0_2),
-        "angles": (angle_idx2, k_th2, th0_2),
-        "torsions": (tors_idx2, tors_k2, tors_n2, tors_g2),
-        "impropers": (impr_idx2, impr_k2, impr_n2, impr_g2),
-        "charges": charges_np,
-        "sigmas": sigmas_np,
-        "epsilons": eps_np,
-        "molecule_id": molecule_id2,
-    }, pf6_molid
-
 
 def make_system_state_from_trial(
     trial: dict,
@@ -444,11 +316,7 @@ def maybe_react_one_event(
     else:
         E_before = mc_energy_evaluator.energy(R)
 
-    trial, _pf6_molid = propose_reaction_trial(
-        sys,
-        cand,
-        reaction=reaction,
-    )
+    trial, _pf6_molid = reaction.build_trial(sys, cand)
 
     if trial is None:
         return key, False, ff, sys, {
@@ -639,17 +507,7 @@ def maybe_react_rate_events(
         if u >= p_react:
             continue
 
-        trial, _pf6_molid = propose_reaction_trial(
-            sys_current,
-            cand,
-            pf6_atoms_np=pf6_atoms_np,
-            atom_types_np=atom_types_np,
-            pf5=pf5,
-            lif=lif,
-            p_type=p_type,
-            f_type=f_type,
-            li_type=li_type,
-        )
+        trial, _pf6_molid = reaction.build_trial(sys, cand)
 
         if trial is None:
             continue

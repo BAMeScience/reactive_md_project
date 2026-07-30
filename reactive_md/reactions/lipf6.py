@@ -9,6 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from .templates_pf5 import LiFTemplate, PF5Template
+from ..topology_opls import remove_terms_in_molid
 
 
 @dataclass(frozen=True)
@@ -228,6 +229,127 @@ class LiPF6Reaction:
             shift_fn=shift_fn,
             eps=eps,
         )
+
+    def build_trial(
+        self,
+        system: Any,
+        candidate: ReactionCandidate,
+    ) -> tuple[dict[str, Any] | None, int | None]:
+        """Build the product-side topology and nonbonded parameters.
+
+        The returned dictionary has the same shape as the current reaction
+        engine expects. A failed atom-type sanity check returns
+        ``(None, None)``.
+        """
+        self._validate_candidate(candidate)
+
+        if not self.candidate_types_are_valid(candidate):
+            return None, None
+
+        k_pf6 = int(candidate.k_pf6)
+        li_idx = int(candidate.li_idx)
+        leave_f = int(candidate.leave_F)
+        phosphorus = self.phosphorus_index(candidate)
+
+        bond_idx, k_b, r0 = (
+            np.asarray(system.bonds[0], dtype=np.int32),
+            np.asarray(system.bonds[1], dtype=np.float32),
+            np.asarray(system.bonds[2], dtype=np.float32),
+        )
+        angle_idx, k_theta, theta0 = (
+            np.asarray(system.angles[0], dtype=np.int32),
+            np.asarray(system.angles[1], dtype=np.float32),
+            np.asarray(system.angles[2], dtype=np.float32),
+        )
+        tors_idx, tors_k, tors_n, tors_gamma = (
+            np.asarray(system.torsions[0], dtype=np.int32),
+            np.asarray(system.torsions[1], dtype=np.float32),
+            np.asarray(system.torsions[2], dtype=np.int32),
+            np.asarray(system.torsions[3], dtype=np.float32),
+        )
+        impr_idx, impr_k, impr_n, impr_gamma = (
+            np.asarray(system.impropers[0], dtype=np.int32),
+            np.asarray(system.impropers[1], dtype=np.float32),
+            np.asarray(system.impropers[2], dtype=np.int32),
+            np.asarray(system.impropers[3], dtype=np.float32),
+        )
+
+        charges = np.asarray(system.charges, dtype=np.float32).copy()
+        sigmas = np.asarray(system.sigmas, dtype=np.float32).copy()
+        epsilons = np.asarray(system.epsilons, dtype=np.float32).copy()
+        molecule_id = np.asarray(system.molecule_id, dtype=np.int32)
+
+        pf6_molid = int(molecule_id[phosphorus])
+
+        bond_idx, (k_b, r0) = remove_terms_in_molid(
+            bond_idx, [k_b, r0], molecule_id, pf6_molid
+        )
+        angle_idx, (k_theta, theta0) = remove_terms_in_molid(
+            angle_idx, [k_theta, theta0], molecule_id, pf6_molid
+        )
+        tors_idx, (tors_k, tors_n, tors_gamma) = remove_terms_in_molid(
+            tors_idx,
+            [tors_k, tors_n, tors_gamma],
+            molecule_id,
+            pf6_molid,
+        )
+        impr_idx, (impr_k, impr_n, impr_gamma) = remove_terms_in_molid(
+            impr_idx,
+            [impr_k, impr_n, impr_gamma],
+            molecule_id,
+            pf6_molid,
+        )
+
+        pf5_global, pf5_bonds, pf5_angles = self.embed_pf5(candidate)
+
+        bond_idx = np.concatenate([bond_idx, pf5_bonds], axis=0)
+        k_b = np.concatenate([k_b, np.asarray(self.pf5.k_b)], axis=0)
+        r0 = np.concatenate([r0, np.asarray(self.pf5.r0)], axis=0)
+
+        angle_idx = np.concatenate([angle_idx, pf5_angles], axis=0)
+        k_theta = np.concatenate(
+            [k_theta, np.asarray(self.pf5.k_theta)], axis=0
+        )
+        theta0 = np.concatenate(
+            [theta0, np.asarray(self.pf5.theta0)], axis=0
+        )
+
+        product_phosphorus = int(pf5_global[0])
+        product_fluorines = pf5_global[1:]
+
+        charges[product_phosphorus] = self.pf5.q["P"]
+        charges[product_fluorines] = self.pf5.q["F"]
+
+        epsilons[product_phosphorus], sigmas[product_phosphorus] = (
+            self.pf5.pair["P"]
+        )
+        epsilons[product_fluorines], sigmas[product_fluorines] = (
+            self.pf5.pair["F"]
+        )
+
+        charges[leave_f] = self.lif.nb["F"]["q"]
+        sigmas[leave_f] = self.lif.nb["F"]["sigma"]
+        epsilons[leave_f] = self.lif.nb["F"]["eps"]
+
+        charges[li_idx] = self.lif.nb["Li"]["q"]
+        sigmas[li_idx] = self.lif.nb["Li"]["sigma"]
+        epsilons[li_idx] = self.lif.nb["Li"]["eps"]
+
+        molecule_id_product = molecule_id.copy()
+        new_molid = int(molecule_id_product.max()) + 1
+        molecule_id_product[leave_f] = new_molid
+
+        trial = {
+            "bonds": (bond_idx, k_b, r0),
+            "angles": (angle_idx, k_theta, theta0),
+            "torsions": (tors_idx, tors_k, tors_n, tors_gamma),
+            "impropers": (impr_idx, impr_k, impr_n, impr_gamma),
+            "charges": charges,
+            "sigmas": sigmas,
+            "epsilons": epsilons,
+            "molecule_id": molecule_id_product,
+        }
+        return trial, pf6_molid
 
     def _validate_candidate(
         self,
