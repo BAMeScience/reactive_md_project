@@ -424,11 +424,16 @@ def maybe_react_rate_events(
 ):
     """Attempt rate-based reactions.
 
-    In rate mode, sigma contributes to the effective rate via
-    reaction_probability().
+    Candidates are evaluated from the same reference geometry. Accepted,
+    non-conflicting topology changes and probe placements are accumulated,
+    followed by one final FIRE relaxation.
     """
-    
-    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
+
+    pf6_reacted_np = np.asarray(
+        sys.pf6_reacted,
+        dtype=bool,
+    ).copy()
+
     base_rate_ps = resolve_rate_ps(
         reaction_rate_ps=reaction_rate_ps,
         activation_energy_eV=activation_energy_eV,
@@ -436,7 +441,6 @@ def maybe_react_rate_events(
         prefactor_ps=prefactor_ps,
     )
 
-    
     candidates = reaction.find_candidates(
         R,
         ff.disp_fn,
@@ -464,9 +468,12 @@ def maybe_react_rate_events(
         }, R
 
     accepted_events = []
-    R_current = R
+
+    R_product = R
     ff_current = ff
     sys_current = sys
+
+    used_li: set[int] = set()
 
     last_p_rate = 0.0
     last_k_eff = 0.0
@@ -479,13 +486,22 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
-        p_react, k_eff, pf_factor = rate_probability_from_reaction_coordinate(
-            sigma=sigma,
-            base_rate_ps=base_rate_ps,
-            reactive_interval_ps=reactive_interval_ps,
-            midpoint=sigma_mid,
-            width=sigma_width,
+        if cand.li_idx in used_li:
+            continue
+
+        sigma = lipf6.reaction_coordinate(
+            d_pf=cand.d_pf,
+            d_lif=cand.d_lif,
+        )
+
+        p_react, k_eff, pf_factor = (
+            rate_probability_from_reaction_coordinate(
+                sigma=sigma,
+                base_rate_ps=base_rate_ps,
+                reactive_interval_ps=reactive_interval_ps,
+                midpoint=sigma_mid,
+                width=sigma_width,
+            )
         )
 
         last_p_rate = p_react
@@ -498,39 +514,49 @@ def maybe_react_rate_events(
         if u >= p_react:
             continue
 
-        trial, _pf6_molid = reaction.build_trial(sys_current, cand)
+        trial, _pf6_molid = reaction.build_trial(
+            sys_current,
+            cand,
+        )
 
         if trial is None:
             continue
 
-        ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
+        ff_trial = build_trial_forcefield(
+            R_product,
+            box,
+            trial,
+            ff_current,
+        )
 
         R_probe = reaction.prepare_probe(
-            R_current,
+            R_product,
             cand,
-            sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
-            sigma_f=float(trial["sigmas"][cand.leave_F]),
+            sigma_p=float(
+                trial["sigmas"][
+                    reaction.phosphorus_index(cand)
+                ]
+            ),
+            sigma_f=float(
+                trial["sigmas"][cand.leave_F]
+            ),
             disp_fn=ff_trial.disp_fn,
             shift_fn=shift_fn,
         )
 
-        R_relaxed, _nlist_relaxed = fire_relax_with_nlist(
-            R_probe,
-            ff_trial=ff_trial,
-            shift_fn=shift_fn,
-            n_steps=30,
-            dt_start=1.0e-3,
-            f_inc=1.01,
-            dt_max=1.0e-2,
-            n_min=2,
-        )
+        if not bool(jnp.all(jnp.isfinite(R_probe))):
+            continue
 
         pf6_reacted_np[cand.k_pf6] = True
-        sys_current = make_system_state_from_trial(trial, pf6_reacted_np)
+        used_li.add(cand.li_idx)
+
+        sys_current = make_system_state_from_trial(
+            trial,
+            pf6_reacted_np,
+        )
 
         ff_current = ff_trial
-        ff_current.nlist = ff_current.neighbor_fn.allocate(R_relaxed)
-        R_current = R_relaxed
+        R_product = R_probe
 
         event_info = _candidate_info(cand)
         event_info.update(
@@ -561,6 +587,30 @@ def maybe_react_rate_events(
             "candidate_records": candidate_records,
         }, R
 
+    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+        R_product,
+        ff_trial=ff_current,
+        shift_fn=shift_fn,
+        n_steps=30,
+        dt_start=1.0e-3,
+        f_inc=1.01,
+        dt_max=1.0e-2,
+        n_min=2,
+    )
+
+    if not bool(jnp.all(jnp.isfinite(R_relaxed))):
+        return key, False, ff, sys, {
+            "mode": "rate",
+            "reason": "nonfinite_relaxed_geometry",
+            "sigma_mid": sigma_mid,
+            "sigma_width": sigma_width,
+            "n_candidates": len(candidates),
+            "n_accepted_this_check": 0,
+            "candidate_records": candidate_records,
+        }, R
+
+    ff_current.nlist = nlist_relaxed
+
     first_event = accepted_events[0]
 
     return key, True, ff_current, sys_current, {
@@ -580,7 +630,7 @@ def maybe_react_rate_events(
         "pf_rate_factor": first_event["pf_rate_factor"],
         "dt_reactive_ps": reactive_interval_ps,
         "candidate_records": candidate_records,
-    }, R_current
+    }, R_relaxed
 
 
 def fire_relax_with_nlist(
