@@ -14,7 +14,7 @@ from jax_md import space
 from .extract_params_oplsaa import parse_lammps_data
 from .config import SimConfig
 from .reactions.templates_pf5 import make_pf5_template, make_lif_template
-from .reactions.lipf6 import discover_pf6_and_li
+from .reactions.lipf6 import LiPF6Reaction, discover_pf6_and_li
 from .forcefield import build_forcefield
 from .reaction import (
     SystemState,
@@ -175,6 +175,17 @@ def main(cfg: SimConfig):
 
     pf5 = make_pf5_template()
     lif = make_lif_template()
+
+    reaction = LiPF6Reaction(
+       pf6_atoms=pf6_atoms,
+       li_atoms=li_atoms,
+       atom_types=atom_types,
+       pf5=pf5,
+       lif=lif,
+       p_type=cfg.p_type,
+       f_type=cfg.f_type,
+       li_type=cfg.li_type,
+    )  
 
     mc_energy_evaluator = None
 
