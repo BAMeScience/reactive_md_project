@@ -468,7 +468,7 @@ def maybe_react_rate_events(
         }, R
 
     accepted_events = []
-
+    accepted_candidates = []
     R_product = R
     ff_current = ff
     sys_current = sys
@@ -523,29 +523,11 @@ def maybe_react_rate_events(
             continue
 
         ff_trial = build_trial_forcefield(
-            R_product,
+            R,
             box,
             trial,
             ff_current,
         )
-
-        R_probe = reaction.prepare_probe(
-            R_product,
-            cand,
-            sigma_p=float(
-                trial["sigmas"][
-                    reaction.phosphorus_index(cand)
-                ]
-            ),
-            sigma_f=float(
-                trial["sigmas"][cand.leave_F]
-            ),
-            disp_fn=ff_trial.disp_fn,
-            shift_fn=shift_fn,
-        )
-
-        if not bool(jnp.all(jnp.isfinite(R_probe))):
-            continue
 
         pf6_reacted_np[cand.k_pf6] = True
         used_li.add(cand.li_idx)
@@ -556,7 +538,6 @@ def maybe_react_rate_events(
         )
 
         ff_current = ff_trial
-        R_product = R_probe
 
         event_info = _candidate_info(cand)
         event_info.update(
@@ -571,6 +552,7 @@ def maybe_react_rate_events(
             }
         )
         accepted_events.append(event_info)
+        accepted_candidates.append(cand)
 
     if not accepted_events:
         return key, False, ff, sys, {
@@ -586,6 +568,28 @@ def maybe_react_rate_events(
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
+
+    R_product = R
+
+    for cand in accepted_candidates:
+        R_probe_single = reaction.prepare_probe(
+            R,
+            cand,
+            sigma_p=float(
+                sys_current.sigmas[
+                reaction.phosphorus_index(cand)
+                ]
+            ),
+            sigma_f=float(
+                sys_current.sigmas[cand.leave_F]
+                ),
+                disp_fn=ff_current.disp_fn,
+                shift_fn=shift_fn,
+        )
+
+        R_product = R_product.at[cand.leave_F].set(
+                R_probe_single[cand.leave_F]
+        )
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
         R_product,
