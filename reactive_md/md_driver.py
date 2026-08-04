@@ -154,24 +154,22 @@ def _write_candidate_records(
     mode = info.get("mode", "metropolis")
 
     accepted_events = info.get("accepted_events")
-
     if accepted_events is None:
-       accepted_event = info.get("accepted_event")
-       accepted_events = (
-           [accepted_event]
-           if accepted_event is not None
-           else []
-       )
+        accepted_event = info.get("accepted_event")
+        accepted_events = (
+            [accepted_event]
+            if accepted_event is not None
+            else []
+        )
 
     accepted_keys = {
         (
-          event.get("k_pf6"),
-          event.get("li_idx"),
-          event.get("leave_F"),
+            event.get("k_pf6"),
+            event.get("li_idx"),
+            event.get("leave_F"),
         )
         for event in accepted_events
     }
-
 
     for rec in info.get("candidate_records", []):
         key = (
@@ -344,13 +342,6 @@ def run_md_nvt_with_reactions(
             if accepted
             else sys.pf6_reacted
             )
-        )
-
-        _write_rate_check(
-            event_file=event_file,
-            step=steps_done,
-            info=info,
-            reacted_count=reacted_count_after_check,
         )
 
         _write_candidate_records(
@@ -552,6 +543,13 @@ def run_md_nvt_with_reactions(
                     f"d_PF={closest['d_pf']:.3f}, "
                     f"sigma={float(sigma):.3f}"
                 )
+
+        _write_rate_check(
+            event_file=event_file,
+            step=steps_done,
+            info=info,
+            reacted_count=reacted_count_after_check,
+        )
 
     print("Done.")
     print(f"Total accepted events: {accepted_events}")
