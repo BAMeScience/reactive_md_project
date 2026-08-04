@@ -153,12 +153,25 @@ def _write_candidate_records(
 
     mode = info.get("mode", "metropolis")
 
-    accepted_event = info.get("accepted_event", {})
-    accepted_key = (
-        accepted_event.get("k_pf6"),
-        accepted_event.get("li_idx"),
-        accepted_event.get("leave_F"),
-    )
+    accepted_events = info.get("accepted_events")
+
+    if accepted_events is None:
+       accepted_event = info.get("accepted_event")
+       accepted_events = (
+           [accepted_event]
+           if accepted_event is not None
+           else []
+       )
+
+    accepted_keys = {
+        (
+          event.get("k_pf6"),
+          event.get("li_idx"),
+          event.get("leave_F"),
+        )
+        for event in accepted_events
+    }
+
 
     for rec in info.get("candidate_records", []):
         key = (
@@ -167,7 +180,7 @@ def _write_candidate_records(
             rec.get("leave_F"),
         )
 
-        accepted = int(key == accepted_key)
+        accepted = int(key in accepted_keys)
 
         sigma = rec.get("sigma")
         if sigma is None:
@@ -324,11 +337,20 @@ def run_md_nvt_with_reactions(
             sys,
         )
 
+        
+        reacted_count_after_check = int(
+            jnp.sum(
+            sys_new.pf6_reacted
+            if accepted
+            else sys.pf6_reacted
+            )
+        )
+
         _write_rate_check(
             event_file=event_file,
             step=steps_done,
             info=info,
-            reacted_count=int(jnp.sum(sys.pf6_reacted)),
+            reacted_count=reacted_count_after_check,
         )
 
         _write_candidate_records(
@@ -336,60 +358,119 @@ def run_md_nvt_with_reactions(
             step=steps_done,
             info=info,
         )
-
+        
+        
         if accepted:
-            accepted_events += 1
-            event = info.get("accepted_event", {})
+            events_this_check = info.get("accepted_events")
 
+            if events_this_check is None:
+               event = info.get("accepted_event")
+               events_this_check = (
+                  [event]
+                  if event is not None
+                  else []
+               )
+
+            accepted_before_check = accepted_events
+            reacted_before_check = int(jnp.sum(sys.pf6_reacted))
+
+            accepted_events += len(events_this_check)
             reacted_count_new = int(jnp.sum(sys_new.pf6_reacted))
-
-            d_lif = event.get("d_lif")
-            d_pf = event.get("d_pf")
-            sigma = event.get("sigma")
-            if sigma is None and d_lif is not None and d_pf is not None:
-                sigma = float(d_pf) - float(d_lif)
-
-            sigma_text = ""
-            if sigma is not None:
-                sigma_text = f", sigma={float(sigma):.3f}"
-
+  
             if info.get("mode") == "rate":
-                print(
-                    f"[step {steps_done}] RATE EVENT accepted "
-                    f"event #{accepted_events}: "
-                    f"pf6={event.get('k_pf6')}, "
-                    f"Li={event.get('li_idx')}, "
-                    f"F={event.get('leave_F')}, "
-                    f"d_LiF={float(d_lif):.3f}, "
-                    f"d_PF={float(d_pf):.3f}"
-                    f"{sigma_text}, "
-                    f"p_rate={float(info.get('p_rate')):.4f}, "
-                    f"n_candidates={info.get('n_candidates')}, "
-                    f"n_accepted_this_check={info.get('n_accepted_this_check')}"
-                )
-            else:
-                print(
-                    f"[step {steps_done}] TOPOLOGY CHANGE accepted "
-                    f"event #{accepted_events}: "
-                    f"pf6={event.get('k_pf6')}, "
-                    f"Li={event.get('li_idx')}, "
-                    f"F={event.get('leave_F')}, "
-                    f"d_LiF={float(d_lif):.3f}, "
-                    f"d_PF={float(d_pf):.3f}"
-                    f"{sigma_text}, "
-                    f"dE={float(info.get('dE')):.4f}, "
-                    f"p_sigma={float(info.get('p_sigma')):.3f}, "
-                    f"pM={float(info.get('p_metropolis')):.3f}, "
-                    f"p={float(info.get('p_total', info.get('p_acc'))):.3f}"
-                )
+               for batch_index, event in enumerate(
+                   events_this_check,
+                   start=1,
+               ):
+                   event_index = accepted_before_check + batch_index
+                   reacted_count_for_event = reacted_before_check + batch_index
 
-            _write_accepted_event(
-                event_file=event_file,
-                step=steps_done,
-                event_index=accepted_events,
-                info=info,
-                reacted_count=reacted_count_new,
-            )
+                   d_lif = event.get("d_lif")
+                   d_pf = event.get("d_pf")
+                   sigma = event.get("sigma")
+
+                   if sigma is None and d_lif is not None and d_pf is not None:
+                      sigma = float(d_pf) - float(d_lif)
+
+                   sigma_text = ""
+                   if sigma is not None:
+                      sigma_text = f", sigma={float(sigma):.3f}"
+
+                   print(
+                      f"[step {steps_done}] RATE EVENT accepted "
+                      f"event #{event_index}: "
+                      f"pf6={event.get('k_pf6')}, "
+                      f"Li={event.get('li_idx')}, "
+                      f"F={event.get('leave_F')}, "
+                      f"d_LiF={float(d_lif):.3f}, "
+                      f"d_PF={float(d_pf):.3f}"
+                      f"{sigma_text}, "
+                      f"p_rate={float(event.get('p_rate')):.4f}, "
+                      f"n_candidates={info.get('n_candidates')}, "
+                      f"n_accepted_this_check="
+                      f"{info.get('n_accepted_this_check')}"
+                   )
+
+                   event_info = dict(info)
+                   event_info["accepted_event"] = event
+                   event_info["p_rate"] = event.get(
+                       "p_rate",
+                       info.get("p_rate"),
+                   )
+                   event_info["k_eff_ps"] = event.get(
+                       "k_eff_ps",
+                       info.get("k_eff_ps"),
+                   )
+                   event_info["pf_rate_factor"] = event.get(
+                       "pf_rate_factor",
+                       info.get("pf_rate_factor"),
+                   )
+
+                   _write_accepted_event(
+                       event_file=event_file,
+                       step=steps_done,
+                       event_index=event_index,
+                       info=event_info,
+                       reacted_count=reacted_count_for_event,
+                   )
+
+            else:
+               event = events_this_check[0]
+
+               d_lif = event.get("d_lif")
+               d_pf = event.get("d_pf")
+               sigma = event.get("sigma")
+
+               if sigma is None and d_lif is not None and d_pf is not None:
+                  sigma = float(d_pf) - float(d_lif)
+
+               sigma_text = ""
+               if sigma is not None:
+                  sigma_text = f", sigma={float(sigma):.3f}"
+
+               print(
+                  f"[step {steps_done}] TOPOLOGY CHANGE accepted "
+                  f"event #{accepted_events}: "
+                  f"pf6={event.get('k_pf6')}, "
+                  f"Li={event.get('li_idx')}, "
+                  f"F={event.get('leave_F')}, "
+                  f"d_LiF={float(d_lif):.3f}, "
+                  f"d_PF={float(d_pf):.3f}"
+                  f"{sigma_text}, "
+                  f"dE={float(info.get('dE')):.4f}, "
+                  f"p_sigma={float(info.get('p_sigma')):.3f}, "
+                  f"pM={float(info.get('p_metropolis')):.3f}, "
+                  f"p={float(info.get('p_total', info.get('p_acc'))):.3f}"
+               )
+
+               _write_accepted_event(
+                   event_file=event_file,
+                   step=steps_done,
+                   event_index=accepted_events,
+                   info=info,
+                   reacted_count=reacted_count_new,
+               )
+            
 
             ff = ff_new
             sys = sys_new
