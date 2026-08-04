@@ -570,7 +570,7 @@ def prepare_probe_geometry(
             "finite and positive."
         )
 
-    p_to_li = disp_fn(r_li, r_p)
+    p_to_li = disp_fn(r_p, r_li)
     p_to_li_distance = jnp.linalg.norm(p_to_li)
 
     direction_to_li = (
