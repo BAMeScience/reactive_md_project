@@ -587,6 +587,33 @@ def maybe_react_rate_events(
                 shift_fn=shift_fn,
         )
 
+        d_lif_before = float(
+                jnp.linalg.norm(
+                   ff_current.disp_fn(
+                      R[cand.li_idx],
+                      R[cand.leave_F],
+                   )
+                )
+        )
+
+        d_lif_after_probe = float(
+                jnp.linalg.norm(
+                   ff_current.disp_fn(
+                      R_probe_single[cand.li_idx],
+                      R_probe_single[cand.leave_F],
+                   )
+                )
+        )
+  
+        print(
+            "[rate probe] "
+            f"pf6={cand.k_pf6}, "
+            f"Li={cand.li_idx}, "
+            f"F={cand.leave_F}, "
+            f"d_LiF_before={d_lif_before:.6f}, "
+            f"d_LiF_after_probe={d_lif_after_probe:.6f}"
+        )
+
         R_product = R_product.at[cand.leave_F].set(
                 R_probe_single[cand.leave_F]
         )
