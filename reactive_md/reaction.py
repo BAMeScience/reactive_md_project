@@ -591,6 +591,28 @@ def maybe_react_rate_events(
              f"sigma_p={sigma_p:.3f} "
             f"sigma_f={sigma_f:.3f}"
         )
+
+        P_atom = reaction.phosphorus_index(cand)
+
+        d_pli_before = float(
+            jnp.linalg.norm(
+               ff_current.disp_fn(
+                  R[P_atom],
+                  R[cand.li_idx],
+               )
+            )
+        )
+
+        print(
+          "[rate probe P-Li] "
+          f"pf6={cand.k_pf6}, "
+          f"P={P_atom}, "
+          f"Li={cand.li_idx}, "
+          f"F={cand.leave_F}, "
+          f"d_PLi={d_pli_before:.6f}"
+        )
+
+
         R_probe_single = reaction.prepare_probe(
             R,
             cand,
