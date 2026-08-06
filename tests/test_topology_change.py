@@ -74,7 +74,7 @@ def test_prepare_r_probe_moves_f_to_lj_target_toward_li():
         [
             [0.0, 0.0, 0.0],  # P
             [1.0, 0.0, 0.0],  # departing F
-            [5.0, 2.0, 0.0],  # Li
+            [6.0, 2.0, 0.0],  # Li
         ],
         dtype=jnp.float32,
     )
@@ -233,3 +233,45 @@ def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
 
     assert jnp.allclose(R_probe, R)
 
+def test_prepare_r_probe_keeps_original_geometry_when_li_f_would_be_too_short():
+    disp_fn, shift_fn = _free_space_functions()
+
+    p_atom = 0
+    f_atom = 1
+    li_atom = 2
+
+    # With these sigmas, the target P-F distance is about 3.592 Å.
+    # For P-Li = 5.0 Å, placing F toward Li at that P-F distance
+    # would give Li-F ≈ 1.408 Å, below the 1.5 Å safety threshold.
+    R = jnp.array(
+        [
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [5.0, 0.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
+    )
+
+    sigma_p = 3.0
+    sigma_f = 3.4
+    min_lif_distance = 1.5
+
+    R_probe = lipf6.prepare_probe_geometry(
+        R,
+        P_atom=p_atom,
+        leave_F=f_atom,
+        li_idx=li_atom,
+        sigma_p=sigma_p,
+        sigma_f=sigma_f,
+        disp_fn=disp_fn,
+        shift_fn=shift_fn,
+        min_lif_distance=min_lif_distance,
+    )
+
+    # The unsafe proposed placement must be rejected.
+    np.testing.assert_allclose(
+        np.asarray(R_probe),
+        np.asarray(R),
+        rtol=0.0,
+        atol=0.0,
+    )
