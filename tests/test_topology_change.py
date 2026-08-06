@@ -74,7 +74,7 @@ def test_prepare_r_probe_moves_f_to_lj_target_toward_li():
         [
             [0.0, 0.0, 0.0],  # P
             [1.0, 0.0, 0.0],  # departing F
-            [6.0, 2.0, 0.0],  # Li
+            [5.0, 2.0, 0.0],  # Li
         ],
         dtype=jnp.float32,
     )
@@ -146,7 +146,7 @@ def test_prepare_r_probe_handles_collinear_geometry():
         [
             [0.0, 0.0, 0.0],  # P
             [1.0, 0.0, 0.0],  # departing F
-            [5.0, 0.0, 0.0],  # Li
+            [6.0, 0.0, 0.0],  # Li
         ],
         dtype=jnp.float32,
     )
