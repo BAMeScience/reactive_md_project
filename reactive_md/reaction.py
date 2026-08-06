@@ -594,8 +594,8 @@ def maybe_react_rate_events(
         R_probe_single = reaction.prepare_probe(
             R,
             cand,
-            sigma_p=sigma_p
-            sigma_f=sigma_f
+            sigma_p=sigma_p,
+            sigma_f=sigma_f,
         )
         d_lif_before = float(
                 jnp.linalg.norm(
