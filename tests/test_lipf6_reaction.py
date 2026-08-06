@@ -185,7 +185,7 @@ def test_find_candidates_uses_owned_pf6_and_li_data():
     )
 
     def displacement(a, b):
-        return b - a
+        return a - b 
 
     candidates = reaction.find_candidates(
         positions,
@@ -230,7 +230,7 @@ def test_prepare_probe_moves_only_leaving_fluorine():
     )
 
     def displacement(a, b):
-        return b - a
+        return a - b
 
     def shift(position, delta):
         return position + delta
