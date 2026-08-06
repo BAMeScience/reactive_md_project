@@ -583,7 +583,7 @@ def maybe_react_rate_events(
     R_product = R
 
     for cand, probe_parameters in zip(accepted_candidates,accepted_probe_parameters,):
-        sigma_p, sigma_f = probe_parameter
+        sigma_p, sigma_f = probe_parameters
         print(
              f"[probe params] "
              f"pf6={cand.k_pf6} "
