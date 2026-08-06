@@ -534,6 +534,7 @@ def prepare_probe_geometry(
     disp_fn,
     shift_fn,
     eps: float = 1.0e-8,
+    min_lif_distance: float = 1.5,
 ):
     """Move the departing F from P toward the reacting Li.
 
@@ -570,7 +571,7 @@ def prepare_probe_geometry(
             "finite and positive."
         )
 
-    p_to_li = disp_fn(r_p, r_li)
+    p_to_li = disp_fn(r_li, r_p)
     p_to_li_distance = jnp.linalg.norm(p_to_li)
 
     direction_to_li = (
@@ -587,6 +588,14 @@ def prepare_probe_geometry(
     )
 
     geometry_is_valid = p_to_li_distance > r_pf_target
+
+    li_to_probe = disp_fn(f_probe, r_li)
+    d_li_probe = jnp.linalg.norm(li_to_probe)
+
+    geometry_is_valid = (
+        (p_to_li_distance > r_pf_target)
+        & (d_li_probe >= min_lif_distance)
+    )
 
     new_f = jnp.where(
         geometry_is_valid,
