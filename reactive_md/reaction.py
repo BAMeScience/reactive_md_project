@@ -338,6 +338,24 @@ def maybe_react_one_event(
         shift_fn=shift_fn,
     )
 
+    d_lif_after_probe = float(
+          jnp.linalg.norm(
+              ff_trial.disp_fn(
+              R_probe[cand.li_idx],
+              R_probe[cand.leave_F],
+           )
+          )
+    )
+
+    print(
+       "[metropolis probe] "
+       f"pf6={cand.k_pf6}, "
+       f"Li={cand.li_idx}, "
+       f"F={cand.leave_F}, "
+       f"d_LiF_before={cand.d_lif:.6f}, "
+       f"d_LiF_after_probe={d_lif_after_probe:.6f}"
+    )
+
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
         R_probe,
         ff_trial=ff_trial,
