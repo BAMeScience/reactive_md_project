@@ -6,7 +6,7 @@ from reactive_md.reactions import lipf6
 
 
 def _disp(a, b):
-    return b - a
+    return a - b
 
 
 def _shift(r, dr):
@@ -45,22 +45,10 @@ def _free_space_functions():
     """Non-periodic displacement and shift functions for unit tests."""
 
     def disp_fn(r_a, r_b):
-        return r_b - r_a
+        return r_a - r_b
 
     def shift_fn(r, dr):
         return r + dr
-
-    return disp_fn, shift_fn
-
-
-def _free_space_functions():
-    """Return displacement and shift functions without periodic boundaries."""
-
-    def disp_fn(position_a, position_b):
-        return position_b - position_a
-
-    def shift_fn(position, displacement):
-        return position + displacement
 
     return disp_fn, shift_fn
 
