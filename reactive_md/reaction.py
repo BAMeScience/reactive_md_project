@@ -596,6 +596,8 @@ def maybe_react_rate_events(
             cand,
             sigma_p=sigma_p,
             sigma_f=sigma_f,
+            disp_fn=ff_current.disp_fn,
+            shift_fn=shift_fn,
         )
         d_lif_before = float(
                 jnp.linalg.norm(
