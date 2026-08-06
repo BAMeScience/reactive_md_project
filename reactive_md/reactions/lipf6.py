@@ -592,6 +592,11 @@ def prepare_probe_geometry(
     li_to_probe = disp_fn(f_probe, r_li)
     d_li_probe = jnp.linalg.norm(li_to_probe)
 
+     # Reject probe geometries that would place the departing fluorine
+     # unrealistically close to the reacting Li (d_li_probe < min_lif_distance). In that case we keep the
+     # original F position and allow FIRE relaxation to reach the product
+     # geometry safely.
+
     geometry_is_valid = (
         (p_to_li_distance > r_pf_target)
         & (d_li_probe >= min_lif_distance)
