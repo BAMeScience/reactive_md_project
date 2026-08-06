@@ -469,6 +469,7 @@ def maybe_react_rate_events(
 
     accepted_events = []
     accepted_candidates = []
+    accepted_probe_parameters = []
     R_product = R
     ff_current = ff
     sys_current = sys
@@ -553,6 +554,16 @@ def maybe_react_rate_events(
         )
         accepted_events.append(event_info)
         accepted_candidates.append(cand)
+        accepted_probe_parameters.append(
+               (
+                 float(
+                    trial["sigmas"][
+                    reaction.phosphorus_index(cand)
+                    ]
+                 ),
+                 float(trial["sigmas"][cand.leave_F]),
+               )
+        )
 
     if not accepted_events:
         return key, False, ff, sys, {
@@ -571,21 +582,20 @@ def maybe_react_rate_events(
 
     R_product = R
 
-    for cand in accepted_candidates:
+    for cand, probe_parameters in zip(accepted_candidates,accepted_probe_parameters,):
+        sigma_p, sigma_f = probe_parameter
+        print(
+             f"[probe params] "
+             f"pf6={cand.k_pf6} "
+             f"F={cand.leave_F} "
+             f"sigma_p={sigma_p:.3f} "
+            f"sigma_f={sigma_f:.3f}"
+        )
         R_probe_single = reaction.prepare_probe(
             R,
             cand,
-            sigma_p=float(
-                sys_current.sigmas[
-                reaction.phosphorus_index(cand)
-                ]
-            ),
-            sigma_f=float(
-                sys_current.sigmas[cand.leave_F]
-                ),
-                disp_fn=ff_current.disp_fn,
-                shift_fn=shift_fn,
-        )
+            sigma_p=sigma_p
+            sigma_f=sigma_f
 
         d_lif_before = float(
                 jnp.linalg.norm(
