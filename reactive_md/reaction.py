@@ -433,9 +433,17 @@ def maybe_react_rate_events(
 ):
     """Attempt rate-based reactions.
 
-    Candidates are evaluated from the same reference geometry. Accepted,
-    non-conflicting topology changes and probe placements are accumulated,
-    followed by one final FIRE relaxation.
+    Candidates are first evaluated using the reaction-coordinate
+    probability p_sigma. Candidates passing this geometric gate are
+    subsequently evaluated using the kinetic probability
+
+        p_rate = 1 - exp(-k * dt)
+
+    where k is either supplied directly or derived from an activation
+    energy.
+
+    Accepted, non-conflicting topology changes and probe placements are
+    accumulated, followed by one final FIRE relaxation.
     """
 
     pf6_reacted_np = np.asarray(
@@ -443,12 +451,34 @@ def maybe_react_rate_events(
         dtype=bool,
     ).copy()
 
+    # ---------------------------------------------------------
+    # Resolve the physical rate constant.
+    # ---------------------------------------------------------
+
     base_rate_ps = resolve_rate_ps(
         reaction_rate_ps=reaction_rate_ps,
         activation_energy_eV=activation_energy_eV,
         temperature_k=temperature_k,
         prefactor_ps=prefactor_ps,
     )
+
+    # ---------------------------------------------------------
+    # Kinetic probability.
+    #
+    # This does not depend on the individual candidate, so calculate
+    # it only once per reaction check.
+    # ---------------------------------------------------------
+
+    p_rate = float(
+        1.0
+        - np.exp(
+            -base_rate_ps * reactive_interval_ps
+        )
+    )
+
+    # ---------------------------------------------------------
+    # Find all reaction candidates from the same reference geometry.
+    # ---------------------------------------------------------
 
     candidates = reaction.find_candidates(
         R,
@@ -468,10 +498,10 @@ def maybe_react_rate_events(
             "sigma_width": sigma_width,
             "n_candidates": 0,
             "n_accepted_this_check": 0,
+            "p_sigma": 0.0,
             "p_rate": 0.0,
+            "p_total": 0.0,
             "k_rate_ps": base_rate_ps,
-            "k_eff_ps": 0.0,
-            "pf_rate_factor": 0.0,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
@@ -479,15 +509,19 @@ def maybe_react_rate_events(
     accepted_events = []
     accepted_candidates = []
     accepted_probe_parameters = []
+
     R_product = R
     ff_current = ff
     sys_current = sys
 
     used_li: set[int] = set()
 
-    last_p_rate = 0.0
-    last_k_eff = 0.0
-    last_pf_factor = 0.0
+    last_p_sigma = 0.0
+    last_p_total = 0.0
+
+    # ---------------------------------------------------------
+    # Candidate loop.
+    # ---------------------------------------------------------
 
     for cand in candidates:
         if len(accepted_events) >= max_reactions_per_check:
@@ -499,30 +533,53 @@ def maybe_react_rate_events(
         if cand.li_idx in used_li:
             continue
 
+        # -----------------------------------------------------
+        # Reaction-coordinate probability.
+        # -----------------------------------------------------
+
         sigma = lipf6.reaction_coordinate(
             d_pf=cand.d_pf,
             d_lif=cand.d_lif,
         )
 
-        p_react, k_eff, pf_factor = (
-            rate_probability_from_reaction_coordinate(
-                sigma=sigma,
-                base_rate_ps=base_rate_ps,
-                reactive_interval_ps=reactive_interval_ps,
-                midpoint=sigma_mid,
-                width=sigma_width,
-            )
+        p_sigma = reaction_probability(
+            sigma,
+            midpoint=sigma_mid,
+            width=sigma_width,
         )
 
-        last_p_rate = p_react
-        last_k_eff = k_eff
-        last_pf_factor = pf_factor
+        p_total = p_sigma * p_rate
+
+        last_p_sigma = p_sigma
+        last_p_total = p_total
+
+        # -----------------------------------------------------
+        # Gate 1: reaction-coordinate / geometric gate.
+        # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u = float(jax.random.uniform(sub))
+        u_sigma = float(jax.random.uniform(sub))
 
-        if u >= p_react:
+        if u_sigma >= p_sigma:
             continue
+
+        # -----------------------------------------------------
+        # Gate 2: kinetic rate gate.
+        #
+        # Only candidates that passed the sigma gate reach this
+        # second random draw.
+        # -----------------------------------------------------
+
+        key, sub = jax.random.split(key)
+        u_rate = float(jax.random.uniform(sub))
+
+        if u_rate >= p_rate:
+            continue
+
+        # -----------------------------------------------------
+        # Both gates passed. Only now perform topology-changing
+        # work.
+        # -----------------------------------------------------
 
         trial, _pf6_molid = reaction.build_trial(
             sys_current,
@@ -549,30 +606,45 @@ def maybe_react_rate_events(
 
         ff_current = ff_trial
 
+        # -----------------------------------------------------
+        # Event logging.
+        # -----------------------------------------------------
+
         event_info = _candidate_info(cand)
+
         event_info.update(
             {
-                "p_rate": p_react,
+                "p_sigma": p_sigma,
+                "p_rate": p_rate,
+                "p_total": p_total,
+                "u_sigma": u_sigma,
+                "u_rate": u_rate,
                 "k_rate_ps": base_rate_ps,
-                "k_eff_ps": k_eff,
-                "pf_rate_factor": pf_factor,
                 "dt_reactive_ps": reactive_interval_ps,
                 "sigma_mid": sigma_mid,
                 "sigma_width": sigma_width,
             }
         )
+
         accepted_events.append(event_info)
         accepted_candidates.append(cand)
+
         accepted_probe_parameters.append(
-               (
-                 float(
+            (
+                float(
                     trial["sigmas"][
-                    reaction.phosphorus_index(cand)
+                        reaction.phosphorus_index(cand)
                     ]
-                 ),
-                 float(trial["sigmas"][cand.leave_F]),
-               )
+                ),
+                float(
+                    trial["sigmas"][cand.leave_F]
+                ),
+            )
         )
+
+    # ---------------------------------------------------------
+    # No reaction accepted.
+    # ---------------------------------------------------------
 
     if not accepted_events:
         return key, False, ff, sys, {
@@ -581,17 +653,24 @@ def maybe_react_rate_events(
             "sigma_width": sigma_width,
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
-            "p_rate": last_p_rate,
+            "p_sigma": last_p_sigma,
+            "p_rate": p_rate,
+            "p_total": last_p_total,
             "k_rate_ps": base_rate_ps,
-            "k_eff_ps": last_k_eff,
-            "pf_rate_factor": last_pf_factor,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
 
+    # ---------------------------------------------------------
+    # Apply the probe placements for all accepted candidates.
+    # ---------------------------------------------------------
+
     R_product = R
 
-    for cand, probe_parameters in zip(accepted_candidates,accepted_probe_parameters,):
+    for cand, probe_parameters in zip(
+        accepted_candidates,
+        accepted_probe_parameters,
+    ):
         sigma_p, sigma_f = probe_parameters
 
         R_probe_single = reaction.prepare_probe(
@@ -604,8 +683,12 @@ def maybe_react_rate_events(
         )
 
         R_product = R_product.at[cand.leave_F].set(
-                R_probe_single[cand.leave_F]
+            R_probe_single[cand.leave_F]
         )
+
+    # ---------------------------------------------------------
+    # Single relaxation after all accepted topology changes.
+    # ---------------------------------------------------------
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
         R_product,
@@ -626,6 +709,9 @@ def maybe_react_rate_events(
             "sigma_width": sigma_width,
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
+            "p_rate": p_rate,
+            "k_rate_ps": base_rate_ps,
+            "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
 
@@ -641,13 +727,13 @@ def maybe_react_rate_events(
         "accepted_event": first_event,
         "n_candidates": len(candidates),
         "n_accepted_this_check": len(accepted_events),
+        "p_sigma": first_event["p_sigma"],
         "p_rate": first_event["p_rate"],
+        "p_total": first_event["p_total"],
         "k_rate_ps": base_rate_ps,
         "activation_energy_eV": activation_energy_eV,
         "temperature_k": temperature_k,
         "prefactor_ps": prefactor_ps,
-        "k_eff_ps": first_event["k_eff_ps"],
-        "pf_rate_factor": first_event["pf_rate_factor"],
         "dt_reactive_ps": reactive_interval_ps,
         "candidate_records": candidate_records,
     }, R_relaxed
