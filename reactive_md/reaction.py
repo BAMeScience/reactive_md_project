@@ -466,15 +466,21 @@ def maybe_react_rate_events(
     # Kinetic probability.
     #
     # This does not depend on the individual candidate, so calculate
-    # it only once per reaction check.
+    # it only once per reaction check: only valid for one reaction type
+    # if multiple reaction types -> this has to be fixed
     # ---------------------------------------------------------
 
     p_rate = float(
-        1.0
-        - np.exp(
-            -base_rate_ps * reactive_interval_ps
-        )
+      base_rate_ps * reactive_interval_ps
     )
+
+    if not 0.0 <= p_rate <= 1.0:
+        raise ValueError(
+              "Rate-based reaction probability must lie between 0 and 1."
+              f"k={base_rate_ps:.6g} ps^-1, "
+              f"dt={reactive_interval_ps:.6g} ps, "
+              f"k*dt={p_rate:.6g}."
+        )
 
     # ---------------------------------------------------------
     # Find all reaction candidates from the same reference geometry.
