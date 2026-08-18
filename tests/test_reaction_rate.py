@@ -213,7 +213,7 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
         ff=initial_ff,
         sys=system,
         reaction=TestReaction(),
-        reaction_rate_ps=1.0e12,
+        reaction_rate_ps=1.0,
         activation_energy_eV=None,
         temperature_k=300.0,
         prefactor_ps=None,
