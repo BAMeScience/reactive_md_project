@@ -437,7 +437,7 @@ def maybe_react_rate_events(
     probability p_sigma. Candidates passing this geometric gate are
     subsequently evaluated using the kinetic probability
 
-        p_rate = 1 - exp(-k * dt)
+        p_rate = k * dt
 
     where k is either supplied directly or derived from an activation
     energy.
