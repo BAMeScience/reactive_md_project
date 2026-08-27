@@ -9,8 +9,7 @@ import jax
 import jax.numpy as jnp
 from jax_md.minimize import fire_descent
 
-from .reactions.templates_pf5 import PF5Template, LiFTemplate
-from .reactions.lipf6 import embed_pf5_into_pf6
+from .reactions import lipf6
 from .topology_opls import remove_terms_in_molid
 from .forcefield import FFBundle, build_forcefield
 
@@ -75,37 +74,6 @@ class SystemState:
     molecule_id: Any
     pf6_reacted: Any
 
-
-@dataclass(frozen=True)
-class ReactionCandidate:
-    """One possible PF6 -> PF5 + Li/F reaction event."""
-
-    k_pf6: int
-    li_idx: int
-    leave_F: int
-    d_lif: float
-    d_pf: float
-
-
-def _distance(disp_fn, Rj, i: int, j: int) -> float:
-    dr = np.asarray(disp_fn(Rj[int(i)], Rj[int(j)]))
-    return float(np.linalg.norm(dr))
-
-
-def reaction_coordinate(*, d_pf: float, d_lif: float) -> float:
-
-    """
-    Reaction coordinate from Fattebert et al. Journal of The Electrochemical Society, 2024 171 080505 for LiPF6 decomposition.
-
-    σ = d(P–F) - d(Li–F)
-
-    σ < 0 : reactant-like configuration
-    σ ≈ 0 : transition region
-    σ > 0 : product-like configuration
-    """
-    return float(d_pf - d_lif)
-
-
 def reaction_probability(
     sigma: float,
     *,
@@ -159,64 +127,17 @@ def rate_probability_from_reaction_coordinate(
     return p_react, k_eff_ps, sigma_factor
 
 
-def find_reaction_candidates(
-    R,
-    pf6_atoms_np: np.ndarray,
-    li_atoms_np: np.ndarray,
-    disp_fn,
-    *,
-    pf6_reacted_np: np.ndarray,
-) -> list[ReactionCandidate]:
-    """Return all possible reaction candidates, ranked by sigma.
 
-    Every unreacted PF6 fluorine and every Li ion is considered. No independent
-    Li-F or P-F hard cutoff is used. The only ordering variable is
-
-        sigma = d(P-F) - d(Li-F)
-    """
-    Rj = jnp.asarray(R)
-    candidates: list[ReactionCandidate] = []
-
-    for k in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k]:
-            continue
-
-        P_atom = int(pf6_atoms_np[k, 0])
-        Fs = pf6_atoms_np[k, 1:]
-
-        for li in li_atoms_np:
-            for f in Fs:
-                li_idx = int(li)
-                f_idx = int(f)
-
-                d_lif = _distance(disp_fn, Rj, li_idx, f_idx)
-                d_pf = _distance(disp_fn, Rj, P_atom, f_idx)
-
-                candidates.append(
-                    ReactionCandidate(
-                        k_pf6=int(k),
-                        li_idx=li_idx,
-                        leave_F=f_idx,
-                        d_lif=float(d_lif),
-                        d_pf=float(d_pf),
-                    )
-                )
-
-    candidates.sort(
-        key=lambda c: reaction_coordinate(d_pf=c.d_pf, d_lif=c.d_lif),
-        reverse=True,
-    )
-    return candidates
 
 def candidate_records_from_reaction_candidates(
-    candidates: list[ReactionCandidate],
+    candidates: list[lipf6.ReactionCandidate],
     *,
     top_n: int = 10,
 ) -> list[dict]:
     """Convert sigma-ranked candidates into dictionaries for logging."""
     records = []
     for rank, cand in enumerate(candidates[: int(top_n)]):
-        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+        sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
         records.append(
             {
                 "rank": int(rank),
@@ -231,8 +152,8 @@ def candidate_records_from_reaction_candidates(
     return records
 
 
-def _candidate_info(cand: ReactionCandidate) -> dict:
-    sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
+def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
+    sigma = lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
     return {
         "k_pf6": cand.k_pf6,
         "li_idx": cand.li_idx,
@@ -242,186 +163,6 @@ def _candidate_info(cand: ReactionCandidate) -> dict:
         "sigma": sigma,
     }
 
-
-def prepare_probe_geometry(
-    R,
-    *,
-    P_atom: int,
-    leave_F: int,
-    li_idx: int,
-    sigma_p: float,
-    sigma_f: float,
-    disp_fn,
-    shift_fn,
-    eps: float = 1.0e-8,
-):
-    """Move the departing F from P toward the reacting Li."""
-
-    r_p = R[P_atom]
-    r_f = R[leave_F]
-    r_li = R[li_idx]
-
-    r_pf_target = (
-        2.0 ** (1.0 / 6.0)
-        * 0.5
-        * (sigma_p + sigma_f)
-    )
-
-    p_to_li = disp_fn(r_p, r_li)
-    p_to_li_distance = jnp.linalg.norm(p_to_li)
-
-    direction_to_li = (
-        p_to_li
-        / jnp.maximum(p_to_li_distance, eps)
-    )
-
-    f_probe = shift_fn(
-        r_p,
-        r_pf_target * direction_to_li,
-    )
-
-    geometry_is_valid = p_to_li_distance > r_pf_target
-
-    new_f = jnp.where(
-        geometry_is_valid,
-        f_probe,
-        r_f,
-    )
-
-    return R.at[leave_F].set(new_f)
-
-def propose_reaction_trial(
-    sys: SystemState,
-    cand: ReactionCandidate,
-    *,
-    pf6_atoms_np: np.ndarray,
-    atom_types_np: np.ndarray,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
-):
-    k_pf6 = cand.k_pf6
-    li_idx = cand.li_idx
-    leave_F = cand.leave_F
-
-    P_atom = int(pf6_atoms_np[k_pf6, 0])
-
-    if (
-        atom_types_np[P_atom] != p_type
-        or atom_types_np[leave_F] != f_type
-        or atom_types_np[li_idx] != li_type
-    ):
-        return None, None
-
-    bond_idx, k_b, r0 = (
-        np.array(sys.bonds[0], dtype=np.int32),
-        np.array(sys.bonds[1], dtype=np.float32),
-        np.array(sys.bonds[2], dtype=np.float32),
-    )
-
-    angle_idx, k_theta, theta0 = (
-        np.array(sys.angles[0], dtype=np.int32),
-        np.array(sys.angles[1], dtype=np.float32),
-        np.array(sys.angles[2], dtype=np.float32),
-    )
-
-    tors_idx, tors_k, tors_n, tors_gamma = (
-        np.array(sys.torsions[0], dtype=np.int32),
-        np.array(sys.torsions[1], dtype=np.float32),
-        np.array(sys.torsions[2], dtype=np.int32),
-        np.array(sys.torsions[3], dtype=np.float32),
-    )
-
-    impr_idx, impr_k, impr_n, impr_gamma = (
-        np.array(sys.impropers[0], dtype=np.int32),
-        np.array(sys.impropers[1], dtype=np.float32),
-        np.array(sys.impropers[2], dtype=np.int32),
-        np.array(sys.impropers[3], dtype=np.float32),
-    )
-
-    charges_np = np.array(sys.charges, dtype=np.float32)
-    sigmas_np = np.array(sys.sigmas, dtype=np.float32)
-    eps_np = np.array(sys.epsilons, dtype=np.float32)
-    molecule_id_np = np.array(sys.molecule_id, dtype=np.int32)
-
-    pf6_molid = int(molecule_id_np[P_atom])
-
-    bond_idx2, (k_b2, r0_2) = remove_terms_in_molid(
-        bond_idx,
-        [k_b, r0],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    angle_idx2, (k_th2, th0_2) = remove_terms_in_molid(
-        angle_idx,
-        [k_theta, theta0],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    tors_idx2, (tors_k2, tors_n2, tors_g2) = remove_terms_in_molid(
-        tors_idx,
-        [tors_k, tors_n, tors_gamma],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    impr_idx2, (impr_k2, impr_n2, impr_g2) = remove_terms_in_molid(
-        impr_idx,
-        [impr_k, impr_n, impr_gamma],
-        molecule_id_np,
-        pf6_molid,
-    )
-
-    pf5_glob, pf5_bonds_g, pf5_angles_g = embed_pf5_into_pf6(
-        pf6_atoms_np[k_pf6],
-        leave_F,
-        pf5_bond_idx_local=pf5.bond_idx_local,
-        pf5_angle_idx_local=pf5.angle_idx_local,
-    )
-
-    bond_idx2 = np.concatenate([bond_idx2, pf5_bonds_g], axis=0)
-    k_b2 = np.concatenate([k_b2, pf5.k_b], axis=0)
-    r0_2 = np.concatenate([r0_2, pf5.r0], axis=0)
-
-    angle_idx2 = np.concatenate([angle_idx2, pf5_angles_g], axis=0)
-    k_th2 = np.concatenate([k_th2, pf5.k_theta], axis=0)
-    th0_2 = np.concatenate([th0_2, pf5.theta0], axis=0)
-
-    P_pf5 = int(pf5_glob[0])
-    Fs_pf5 = pf5_glob[1:]
-
-    charges_np[P_pf5] = pf5.q["P"]
-    charges_np[Fs_pf5] = pf5.q["F"]
-
-    eps_np[P_pf5], sigmas_np[P_pf5] = pf5.pair["P"]
-    eps_np[Fs_pf5], sigmas_np[Fs_pf5] = pf5.pair["F"]
-
-    charges_np[leave_F] = lif.nb["F"]["q"]
-    sigmas_np[leave_F] = lif.nb["F"]["sigma"]
-    eps_np[leave_F] = lif.nb["F"]["eps"]
-
-    charges_np[li_idx] = lif.nb["Li"]["q"]
-    sigmas_np[li_idx] = lif.nb["Li"]["sigma"]
-    eps_np[li_idx] = lif.nb["Li"]["eps"]
-
-    molecule_id2 = molecule_id_np.copy()
-    new_molid = int(molecule_id2.max()) + 1
-    molecule_id2[leave_F] = new_molid
-
-    return {
-        "bonds": (bond_idx2, k_b2, r0_2),
-        "angles": (angle_idx2, k_th2, th0_2),
-        "torsions": (tors_idx2, tors_k2, tors_n2, tors_g2),
-        "impropers": (impr_idx2, impr_k2, impr_n2, impr_g2),
-        "charges": charges_np,
-        "sigmas": sigmas_np,
-        "epsilons": eps_np,
-        "molecule_id": molecule_id2,
-    }, pf6_molid
 
 
 def make_system_state_from_trial(
@@ -500,33 +241,22 @@ def maybe_react_one_event(
     shift_fn,
     ff: FFBundle,
     sys: SystemState,
-    pf6_atoms,
-    li_atoms,
-    atom_types,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
+    reaction: lipf6.LiPF6Reaction,
     beta: float,
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
 ):
-    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
-    li_atoms_np = np.array(li_atoms, dtype=np.int32)
+
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    atom_types_np = np.array(atom_types)
 
-    candidates = find_reaction_candidates(
+    candidates = reaction.find_candidates(
         R,
-        pf6_atoms_np,
-        li_atoms_np,
         ff.disp_fn,
-        pf6_reacted_np=pf6_reacted_np,
+        pf6_reacted=pf6_reacted_np,
     )
-
+    
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -547,7 +277,7 @@ def maybe_react_one_event(
         "leave_F": cand.leave_F,
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
-        "sigma": reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
+        "sigma": lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
     }
 
     sigma = candidate_info["sigma"]
@@ -583,17 +313,7 @@ def maybe_react_one_event(
     else:
         E_before = mc_energy_evaluator.energy(R)
 
-    trial, _pf6_molid = propose_reaction_trial(
-        sys,
-        cand,
-        pf6_atoms_np=pf6_atoms_np,
-        atom_types_np=atom_types_np,
-        pf5=pf5,
-        lif=lif,
-        p_type=p_type,
-        f_type=f_type,
-        li_type=li_type,
-    )
+    trial, _pf6_molid = reaction.build_trial(sys, cand)
 
     if trial is None:
         return key, False, ff, sys, {
@@ -609,17 +329,22 @@ def maybe_react_one_event(
 
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
-    P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-
-    R_probe = prepare_probe_geometry(
+    R_probe = reaction.prepare_probe(
         R,
-        P_atom=P_atom,
-        leave_F=cand.leave_F,
-        li_idx=cand.li_idx,
-        sigma_p=float(trial["sigmas"][P_atom]),
+        cand,
+        sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
         sigma_f=float(trial["sigmas"][cand.leave_F]),
         disp_fn=ff_trial.disp_fn,
         shift_fn=shift_fn,
+    )
+
+    d_lif_after_probe = float(
+          jnp.linalg.norm(
+              ff_trial.disp_fn(
+              R_probe[cand.li_idx],
+              R_probe[cand.leave_F],
+           )
+          )
     )
 
     R_relaxed, nlist_relaxed = fire_relax_with_nlist(
@@ -695,14 +420,7 @@ def maybe_react_rate_events(
     shift_fn,
     ff: FFBundle,
     sys: SystemState,
-    pf6_atoms,
-    li_atoms,
-    atom_types,
-    pf5: PF5Template,
-    lif: LiFTemplate,
-    p_type: int,
-    f_type: int,
-    li_type: int,
+    reaction: lipf6.LiPF6Reaction,
     reaction_rate_ps: float | None,
     activation_energy_eV: float | None,
     temperature_k: float,
@@ -715,13 +433,27 @@ def maybe_react_rate_events(
 ):
     """Attempt rate-based reactions.
 
-    In rate mode, sigma contributes to the effective rate via
-    reaction_probability().
+    Candidates are first evaluated using the reaction-coordinate
+    probability p_sigma. Candidates passing this geometric gate are
+    subsequently evaluated using the kinetic probability
+
+        p_rate = k * dt
+
+    where k is either supplied directly or derived from an activation
+    energy.
+
+    Accepted, non-conflicting topology changes and probe placements are
+    accumulated, followed by one final FIRE relaxation.
     """
-    pf6_atoms_np = np.array(pf6_atoms, dtype=np.int32)
-    li_atoms_np = np.array(li_atoms, dtype=np.int32)
-    pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
-    atom_types_np = np.array(atom_types)
+
+    pf6_reacted_np = np.asarray(
+        sys.pf6_reacted,
+        dtype=bool,
+    ).copy()
+
+    # ---------------------------------------------------------
+    # Resolve the physical rate constant.
+    # ---------------------------------------------------------
 
     base_rate_ps = resolve_rate_ps(
         reaction_rate_ps=reaction_rate_ps,
@@ -730,13 +462,36 @@ def maybe_react_rate_events(
         prefactor_ps=prefactor_ps,
     )
 
-    candidates = find_reaction_candidates(
-        R,
-        pf6_atoms_np,
-        li_atoms_np,
-        ff.disp_fn,
-        pf6_reacted_np=pf6_reacted_np,
+    # ---------------------------------------------------------
+    # Kinetic probability.
+    #
+    # This does not depend on the individual candidate, so calculate
+    # it only once per reaction check: only valid for one reaction type
+    # if multiple reaction types -> this has to be fixed
+    # ---------------------------------------------------------
+
+    p_rate = float(
+      base_rate_ps * reactive_interval_ps
     )
+
+    if not 0.0 <= p_rate <= 1.0:
+        raise ValueError(
+              "Rate-based reaction probability must lie between 0 and 1."
+              f"k={base_rate_ps:.6g} ps^-1, "
+              f"dt={reactive_interval_ps:.6g} ps, "
+              f"k*dt={p_rate:.6g}."
+        )
+
+    # ---------------------------------------------------------
+    # Find all reaction candidates from the same reference geometry.
+    # ---------------------------------------------------------
+
+    candidates = reaction.find_candidates(
+        R,
+        ff.disp_fn,
+        pf6_reacted=pf6_reacted_np,
+    )
+
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -749,22 +504,30 @@ def maybe_react_rate_events(
             "sigma_width": sigma_width,
             "n_candidates": 0,
             "n_accepted_this_check": 0,
+            "p_sigma": 0.0,
             "p_rate": 0.0,
+            "p_total": 0.0,
             "k_rate_ps": base_rate_ps,
-            "k_eff_ps": 0.0,
-            "pf_rate_factor": 0.0,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
 
     accepted_events = []
-    R_current = R
+    accepted_candidates = []
+    accepted_probe_parameters = []
+
+    R_product = R
     ff_current = ff
     sys_current = sys
 
-    last_p_rate = 0.0
-    last_k_eff = 0.0
-    last_pf_factor = 0.0
+    used_li: set[int] = set()
+
+    last_p_sigma = 0.0
+    last_p_total = 0.0
+
+    # ---------------------------------------------------------
+    # Candidate loop.
+    # ---------------------------------------------------------
 
     for cand in candidates:
         if len(accepted_events) >= max_reactions_per_check:
@@ -773,86 +536,121 @@ def maybe_react_rate_events(
         if pf6_reacted_np[cand.k_pf6]:
             continue
 
-        sigma = reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif)
-        p_react, k_eff, pf_factor = rate_probability_from_reaction_coordinate(
-            sigma=sigma,
-            base_rate_ps=base_rate_ps,
-            reactive_interval_ps=reactive_interval_ps,
+        if cand.li_idx in used_li:
+            continue
+
+        # -----------------------------------------------------
+        # Reaction-coordinate probability.
+        # -----------------------------------------------------
+
+        sigma = lipf6.reaction_coordinate(
+            d_pf=cand.d_pf,
+            d_lif=cand.d_lif,
+        )
+
+        p_sigma = reaction_probability(
+            sigma,
             midpoint=sigma_mid,
             width=sigma_width,
         )
 
-        last_p_rate = p_react
-        last_k_eff = k_eff
-        last_pf_factor = pf_factor
+        p_total = p_sigma * p_rate
+
+        last_p_sigma = p_sigma
+        last_p_total = p_total
+
+        # -----------------------------------------------------
+        # Gate 1: reaction-coordinate / geometric gate.
+        # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u = float(jax.random.uniform(sub))
+        u_sigma = float(jax.random.uniform(sub))
 
-        if u >= p_react:
+        if u_sigma >= p_sigma:
             continue
 
-        trial, _pf6_molid = propose_reaction_trial(
+        # -----------------------------------------------------
+        # Gate 2: kinetic rate gate.
+        #
+        # Only candidates that passed the sigma gate reach this
+        # second random draw.
+        # -----------------------------------------------------
+
+        key, sub = jax.random.split(key)
+        u_rate = float(jax.random.uniform(sub))
+
+        if u_rate >= p_rate:
+            continue
+
+        # -----------------------------------------------------
+        # Both gates passed. Only now perform topology-changing
+        # work.
+        # -----------------------------------------------------
+
+        trial, _pf6_molid = reaction.build_trial(
             sys_current,
             cand,
-            pf6_atoms_np=pf6_atoms_np,
-            atom_types_np=atom_types_np,
-            pf5=pf5,
-            lif=lif,
-            p_type=p_type,
-            f_type=f_type,
-            li_type=li_type,
         )
 
         if trial is None:
             continue
 
-        ff_trial = build_trial_forcefield(R_current, box, trial, ff_current)
-
-        P_atom = int(pf6_atoms_np[cand.k_pf6, 0])
-       
-        R_probe = prepare_probe_geometry(
+        ff_trial = build_trial_forcefield(
             R,
-            P_atom=P_atom,
-            leave_F=cand.leave_F,
-            li_idx=cand.li_idx,
-            sigma_p=float(trial["sigmas"][P_atom]),
-            sigma_f=float(trial["sigmas"][cand.leave_F]),
-            disp_fn=ff_trial.disp_fn,
-            shift_fn=shift_fn,
-        )
-
-        R_relaxed, _nlist_relaxed = fire_relax_with_nlist(
-            R_probe,
-            ff_trial=ff_trial,
-            shift_fn=shift_fn,
-            n_steps=30,
-            dt_start=1.0e-3,
-            f_inc=1.01,
-            dt_max=1.0e-2,
-            n_min=2,
+            box,
+            trial,
+            ff_current,
         )
 
         pf6_reacted_np[cand.k_pf6] = True
-        sys_current = make_system_state_from_trial(trial, pf6_reacted_np)
+        used_li.add(cand.li_idx)
+
+        sys_current = make_system_state_from_trial(
+            trial,
+            pf6_reacted_np,
+        )
 
         ff_current = ff_trial
-        ff_current.nlist = ff_current.neighbor_fn.allocate(R_relaxed)
-        R_current = R_relaxed
+
+        # -----------------------------------------------------
+        # Event logging.
+        # -----------------------------------------------------
 
         event_info = _candidate_info(cand)
+
         event_info.update(
             {
-                "p_rate": p_react,
+                "p_sigma": p_sigma,
+                "p_rate": p_rate,
+                "p_total": p_total,
+                "u_sigma": u_sigma,
+                "u_rate": u_rate,
                 "k_rate_ps": base_rate_ps,
-                "k_eff_ps": k_eff,
-                "pf_rate_factor": pf_factor,
                 "dt_reactive_ps": reactive_interval_ps,
                 "sigma_mid": sigma_mid,
                 "sigma_width": sigma_width,
             }
         )
+
         accepted_events.append(event_info)
+        accepted_candidates.append(cand)
+
+        accepted_probe_parameters.append(
+            (
+                float(
+                    trial["sigmas"][
+                        reaction.phosphorus_index(cand)
+                    ]
+                ),
+                float(
+                    trial["sigmas"][cand.leave_F]
+                ),
+            )
+        )
+
+    # ---------------------------------------------------------
+    # No reaction accepted.
+    # ---------------------------------------------------------
 
     if not accepted_events:
         return key, False, ff, sys, {
@@ -861,13 +659,69 @@ def maybe_react_rate_events(
             "sigma_width": sigma_width,
             "n_candidates": len(candidates),
             "n_accepted_this_check": 0,
-            "p_rate": last_p_rate,
+            "p_sigma": last_p_sigma,
+            "p_rate": p_rate,
+            "p_total": last_p_total,
             "k_rate_ps": base_rate_ps,
-            "k_eff_ps": last_k_eff,
-            "pf_rate_factor": last_pf_factor,
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
+
+    # ---------------------------------------------------------
+    # Apply the probe placements for all accepted candidates.
+    # ---------------------------------------------------------
+
+    R_product = R
+
+    for cand, probe_parameters in zip(
+        accepted_candidates,
+        accepted_probe_parameters,
+    ):
+        sigma_p, sigma_f = probe_parameters
+
+        R_probe_single = reaction.prepare_probe(
+            R,
+            cand,
+            sigma_p=sigma_p,
+            sigma_f=sigma_f,
+            disp_fn=ff_current.disp_fn,
+            shift_fn=shift_fn,
+        )
+
+        R_product = R_product.at[cand.leave_F].set(
+            R_probe_single[cand.leave_F]
+        )
+
+    # ---------------------------------------------------------
+    # Single relaxation after all accepted topology changes.
+    # ---------------------------------------------------------
+
+    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
+        R_product,
+        ff_trial=ff_current,
+        shift_fn=shift_fn,
+        n_steps=30,
+        dt_start=1.0e-3,
+        f_inc=1.01,
+        dt_max=1.0e-2,
+        n_min=2,
+    )
+
+    if not bool(jnp.all(jnp.isfinite(R_relaxed))):
+        return key, False, ff, sys, {
+            "mode": "rate",
+            "reason": "nonfinite_relaxed_geometry",
+            "sigma_mid": sigma_mid,
+            "sigma_width": sigma_width,
+            "n_candidates": len(candidates),
+            "n_accepted_this_check": 0,
+            "p_rate": p_rate,
+            "k_rate_ps": base_rate_ps,
+            "dt_reactive_ps": reactive_interval_ps,
+            "candidate_records": candidate_records,
+        }, R
+
+    ff_current.nlist = nlist_relaxed
 
     first_event = accepted_events[0]
 
@@ -879,16 +733,16 @@ def maybe_react_rate_events(
         "accepted_event": first_event,
         "n_candidates": len(candidates),
         "n_accepted_this_check": len(accepted_events),
+        "p_sigma": first_event["p_sigma"],
         "p_rate": first_event["p_rate"],
+        "p_total": first_event["p_total"],
         "k_rate_ps": base_rate_ps,
         "activation_energy_eV": activation_energy_eV,
         "temperature_k": temperature_k,
         "prefactor_ps": prefactor_ps,
-        "k_eff_ps": first_event["k_eff_ps"],
-        "pf_rate_factor": first_event["pf_rate_factor"],
         "dt_reactive_ps": reactive_interval_ps,
         "candidate_records": candidate_records,
-    }, R_current
+    }, R_relaxed
 
 
 def fire_relax_with_nlist(

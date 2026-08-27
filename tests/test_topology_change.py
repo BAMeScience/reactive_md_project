@@ -2,11 +2,11 @@ import numpy as np
 import jax.numpy as jnp
 import pytest
 
-from reactive_md.reaction import prepare_probe_geometry
+from reactive_md.reactions import lipf6
 
 
 def _disp(a, b):
-    return b - a
+    return a - b
 
 
 def _shift(r, dr):
@@ -24,7 +24,7 @@ def test_prepare_probe_geometry_does_not_change_unrelated_atoms():
         dtype=jnp.float32,
     )
 
-    R_new = prepare_probe_geometry(
+    R_new = lipf6.prepare_probe_geometry(
         R,
         P_atom=0,
         leave_F=1,
@@ -45,27 +45,10 @@ def _free_space_functions():
     """Non-periodic displacement and shift functions for unit tests."""
 
     def disp_fn(r_a, r_b):
-        return r_b - r_a
+        return r_a - r_b
 
     def shift_fn(r, dr):
         return r + dr
-
-    return disp_fn, shift_fn
-
-import jax.numpy as jnp
-import pytest
-
-from reactive_md.reaction import prepare_probe_geometry
-
-
-def _free_space_functions():
-    """Return displacement and shift functions without periodic boundaries."""
-
-    def disp_fn(position_a, position_b):
-        return position_b - position_a
-
-    def shift_fn(position, displacement):
-        return position + displacement
 
     return disp_fn, shift_fn
 
@@ -106,7 +89,7 @@ def test_prepare_r_probe_moves_f_to_lj_target_toward_li():
         float(trial_sigmas[f_atom]),
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
@@ -163,7 +146,7 @@ def test_prepare_r_probe_handles_collinear_geometry():
         [
             [0.0, 0.0, 0.0],  # P
             [1.0, 0.0, 0.0],  # departing F
-            [5.0, 0.0, 0.0],  # Li
+            [6.0, 0.0, 0.0],  # Li
         ],
         dtype=jnp.float32,
     )
@@ -178,7 +161,7 @@ def test_prepare_r_probe_handles_collinear_geometry():
         float(trial_sigmas[f_atom]),
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
@@ -237,7 +220,7 @@ def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
         dtype=jnp.float32,
     )
 
-    R_probe = prepare_probe_geometry(
+    R_probe = lipf6.prepare_probe_geometry(
         R,
         P_atom=p_atom,
         leave_F=f_atom,
@@ -250,3 +233,45 @@ def test_prepare_r_probe_returns_original_geometry_when_no_intersection():
 
     assert jnp.allclose(R_probe, R)
 
+def test_prepare_r_probe_keeps_original_geometry_when_li_f_would_be_too_short():
+    disp_fn, shift_fn = _free_space_functions()
+
+    p_atom = 0
+    f_atom = 1
+    li_atom = 2
+
+    # With these sigmas, the target P-F distance is about 3.592 Å.
+    # For P-Li = 5.0 Å, placing F toward Li at that P-F distance
+    # would give Li-F ≈ 1.408 Å, below the 1.5 Å safety threshold.
+    R = jnp.array(
+        [
+            [0.0, 0.0, 0.0],  # P
+            [1.0, 0.0, 0.0],  # departing F
+            [5.0, 0.0, 0.0],  # Li
+        ],
+        dtype=jnp.float32,
+    )
+
+    sigma_p = 3.0
+    sigma_f = 3.4
+    min_lif_distance = 1.5
+
+    R_probe = lipf6.prepare_probe_geometry(
+        R,
+        P_atom=p_atom,
+        leave_F=f_atom,
+        li_idx=li_atom,
+        sigma_p=sigma_p,
+        sigma_f=sigma_f,
+        disp_fn=disp_fn,
+        shift_fn=shift_fn,
+        min_lif_distance=min_lif_distance,
+    )
+
+    # The unsafe proposed placement must be rejected.
+    np.testing.assert_allclose(
+        np.asarray(R_probe),
+        np.asarray(R),
+        rtol=0.0,
+        atol=0.0,
+    )
