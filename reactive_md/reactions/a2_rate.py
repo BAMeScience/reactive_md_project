@@ -578,6 +578,16 @@ def a2_rate_reactive_cycle(
     # Construct trial dictionary.
     # ---------------------------------------------------------
 
+    # Each unbonded atom starts as its own molecule.
+    new_molecule_id = np.arange(
+        len(system.molecule_id),
+        dtype=np.int32,
+    )
+
+    # Each A2 bond joins exactly two atoms into one molecule.
+    for i, j in new_bond_idx:
+        new_molecule_id[int(j)] = new_molecule_id[int(i)]
+
     trial = {
         "bonds": (
             new_bond_idx,
@@ -614,10 +624,8 @@ def a2_rate_reactive_cycle(
         "epsilons": np.asarray(
             system.epsilons
         ).copy(),
-        "molecule_id": np.asarray(
-            system.molecule_id,
-            dtype=np.int32,
-        ).copy(),
+        "molecule_id": new_molecule_id
+        .copy(),
     }
 
     # ---------------------------------------------------------
