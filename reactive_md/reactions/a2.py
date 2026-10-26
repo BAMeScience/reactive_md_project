@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 
 
@@ -66,6 +68,9 @@ class A2Reaction:
         k_bond_jax: float,
         r0_bond: float,
         association_cutoff: float = 2.7,
+        bond_energy_offset: float = 0.0,
+        association_displacement: float = 0.25,
+        dissociation_displacement: float = 0.25,
     ):
         self.a_indices = np.asarray(
             a_indices,
@@ -75,6 +80,16 @@ class A2Reaction:
         self.k_bond_jax = float(k_bond_jax)
         self.r0_bond = float(r0_bond)
         self.association_cutoff = float(association_cutoff)
+        self.bond_energy_offset = float(bond_energy_offset)
+        self.association_displacement = float(association_displacement)
+        if self.association_displacement < 0.0:
+           raise ValueError("association_displacement must be nonnegative.")
+
+        self.dissociation_displacement = float(dissociation_displacement)
+
+        # Compile once per displacement function; reuse for each MD step.
+        self._association_disp_fn = None
+        self._association_batched_disp = None
 
         if self.a_indices.ndim != 1:
             raise ValueError(
@@ -156,32 +171,41 @@ class A2Reaction:
         # Search unique free A-A pairs.
         # -----------------------------------------------------
 
-        candidates = []
+        if len(free_a) < 2:
+            return []
 
-        for n, i in enumerate(free_a):
-            for j in free_a[n + 1:]:
+        # np.triu_indices enumerates pairs in the same order as the
+        # original nested loops. Preserve that order because a2_rate.py
+        # randomizes the candidate pool using the NumPy RNG.
+        free_a = np.asarray(free_a, dtype=np.int32)
+        left, right = np.triu_indices(len(free_a), k=1)
+        pair_i = free_a[left]
+        pair_j = free_a[right]
 
-                dr = disp_fn(
-                    R_np[i],
-                    R_np[j],
-                )
+        # JAX-MD displacement functions operate on one pair at a time.
+        # vmap batches all pairs, and jit avoids tracing on every MD step.
+        # Rebuild only if a different displacement function is supplied.
+        if disp_fn is not self._association_disp_fn:
+            self._association_batched_disp = jax.jit(jax.vmap(disp_fn))
+            self._association_disp_fn = disp_fn
 
-                distance = float(
-                    np.linalg.norm(
-                        np.asarray(dr)
-                    )
-                )
+        positions = jnp.asarray(R_np)
+        displacements = self._association_batched_disp(
+            positions[pair_i], positions[pair_j]
+        )
 
-                if distance <= cutoff:
-                    candidates.append(
-                        A2AssociationCandidate(
-                            i=i,
-                            j=j,
-                            distance=distance,
-                        )
-                    )
+        # Keep NumPy's norm and cutoff comparison from the original code.
+        distances = np.linalg.norm(np.asarray(displacements), axis=1)
+        eligible = np.flatnonzero(distances <= cutoff)
 
-        return candidates
+        return [
+            A2AssociationCandidate(
+                i=int(pair_i[k]),
+                j=int(pair_j[k]),
+                distance=float(distances[k]),
+            )
+            for k in eligible
+        ]
 
     def find_dissociation_candidates(
         self,

@@ -2,6 +2,24 @@
 
 # reactive-md
 
+## Current development architecture
+
+This is the **single development repository**. The original 100 ns A2
+simulation is a read-only scientific reference; do not overwrite its code or
+Python environment. The current structure separates:
+
+- `reactive_md/engine/contracts.py`: chemistry-neutral reaction and observer contracts
+- `reactive_md/engine/nvt.py`: Nose-Hoover NVT integration and neighbor-list recovery
+- `reactive_md/md_driver.py`: generic MD loop, reaction dispatch, and observer notifications
+- `reactive_md/reactions/`: A2 rate, A2 Metropolis and LiPF6 handlers/output adapters
+- `tools/audit_a2_trajectory.py`: dependency-free 100 ns CSV consistency checker
+
+Legacy `run_md_nvt_a2` and `run_md_nvt_with_reactions` imports remain supported.
+The original small/reversible A2 example scripts are restored in `scripts/`.
+See `DEVELOPMENT_STATUS.md` for verified tests and outstanding JAX-MD validation.
+
+---
+
 Reactive molecular dynamics framework for topology-changing simulations using JAX-MD.
 
 The package supports:
@@ -52,6 +70,24 @@ or with uv:
 uv pip install -e .
 ```
 
+## Running tests on HPC
+
+Run from the repository root in the development environment:
+
+```bash
+python -m pytest -q tests/
+# Or through SLURM:
+srun --gres=gpu:1 --time=00:10:00 python -m pytest -q tests/
+```
+
+Pytest is configured with `pythonpath = ["."]` so imports from the
+repository-local `scripts/` package work with either `pytest` or
+`python -m pytest`. If test collection refers to `tests/test_reaction.py` or
+`tests/test_topology_opls.py`, the checkout contains tests **not shipped in
+this development archive**. Back up those old tests before migrating them;
+they refer to interfaces absent from the current implementation. A clean
+checkout is preferable to extracting the archive over an older source tree.
+
 ## Development installation
 
 Install the package together with the test/development tools:
@@ -61,7 +97,7 @@ uv pip install -e .
 uv pip install pytest ruff
 ```
 
-If you prefer optional dependency groups, move the `dev` dependency list into `[project.optional-dependencies]` in `pyproject.toml`, then use:
+Alternatively, install the included development extras:
 
 ```bash
 uv pip install -e ".[dev]"
@@ -427,3 +463,72 @@ If you use this software in academic work, please cite:
 # License
 
 See LICENSE file.
+
+---
+
+# Reaction plugins and the generic MD engine (experimental refactor)
+
+`reactive_md.md_driver` now owns **only** the generic Nose–Hoover NVT
+integrator, transactional neighbor-list overflow recovery, reaction-handler
+protocol, and observer dispatch. It contains no A2 or LiPF6 candidate logic.
+
+- `reactive_md.reactions.a2_handlers.A2RateHandler` wraps the existing A2
+  kinetic cycle, including its optional Langevin relaxation.
+- `reactive_md.reactions.a2_handlers.A2MetropolisHandler` wraps the
+  fixed-coordinate Metropolis–Hastings cycle.
+- `reactive_md.reactions.lipf6_handler.LiPF6Handler` adapts the existing
+  LiPF6 callback to the generic interface.
+- `reactive_md.observers.EnergyCSVObserver` and `EventJSONLObserver` implement
+  chemistry-neutral output formats.
+
+A generic simulation can be launched with the following pattern (using an
+already constructed force field, system state, box, and A2 reaction model):
+
+```python
+from reactive_md.md_driver import run_md_nvt
+from reactive_md.reactions.a2_handlers import A2MetropolisHandler
+from reactive_md.observers import EnergyCSVObserver, EventJSONLObserver
+
+handler = A2MetropolisHandler(reaction=reaction, rng=rng)
+with open('energy.csv', 'w') as energy_file, open('events.jsonl', 'w') as event_file:
+    result = run_md_nvt(
+        key, cfg=cfg, init_positions=R, masses=masses, shift_fn=shift_fn,
+        ff=ff, sys=system, box=box, reaction_handler=handler,
+        observers=(EnergyCSVObserver(energy_file), EventJSONLObserver(event_file)),
+    )
+```
+
+Existing entry points remain available:
+
+- `reactive_md.md_a2_driver.run_md_nvt_a2` preserves A2-specific RDF,
+  population history, LAMMPS dump, and CSV formats.
+- `reactive_md.md_driver.run_md_nvt_with_reactions` remains a lazy
+  compatibility alias for the LiPF6 driver.
+- `reactive_md.md_driver.run_md_nvt_a2` remains a lazy compatibility alias.
+
+Both compatibility drivers now use the same generic `run_md_nvt` engine.
+LiPF6-specific CSVs and trajectory dumps live in `reactions/lipf6_output.py`;
+the optional `on_before_reaction` hook captures pre-reaction energies and
+frames without adding chemistry-specific branches to the MD engine.
+
+The LiPF6 driver
+also benefits from overflow-checked MD chunks and a refreshed cached force
+following topology changes. That can change a trajectory compared with the
+previous implementation, so run numerical regression checks before production.
+
+The current A2 MC implementation is a *topology-only* sampler. Its attempt
+frequency is not a physical reaction rate. The target distribution uses the
+force-field energy (including the per-dimer energy offset); there is no
+independent chemical-potential or standard-state correction. Coordinate-changing
+MC proposals require their own reversible proposal-density correction.
+
+This archive **includes** the restored `scripts/` package imported by
+the small A2 tests. The original `jax-md` dependency is still required for
+integration tests. Do not deploy this experimental refactor into an ongoing
+production job without testing it in a separate environment.
+
+## Development refactor status
+
+See [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) for the single-repository
+plugin refactor, compatibility guarantees, test results, and outstanding
+validation before production use.

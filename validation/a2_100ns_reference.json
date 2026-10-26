@@ -1,0 +1,19 @@
+{
+  "description": "Observed 100 ns A2 kinetic reference, 1024 particles (200 A, 824 B), rho*=0.70, 188 K",
+  "source": "User-supplied a2_trajectory and a2_events CSVs; original running-version implementation",
+  "active_md_duration_ps": 100000.0,
+  "post_equilibration_window_ps": [10000.0, 100000.0],
+  "n_atoms": 1024,
+  "n_a": 200,
+  "n_samples": 10001,
+  "n_post_equilibration_samples": 9001,
+  "n_association_events": 403,
+  "n_dissociation_events": 337,
+  "n_final_a2": 66,
+  "mean_a2_post_equilibration": 68.75391623152983,
+  "mean_potential_energy_kcal_mol_post_equilibration": -2206.515825281566,
+  "mean_kinetic_temperature_k_post_equilibration": 188.02495472184486,
+  "cumulative_relaxation_ps": 718.0,
+  "interpretation": "Statistically stationary kinetic reference; not proof of canonical detailed balance.",
+  "comparison_guidance": "For new stochastic trajectories compare distributions and uncertainty, not exact final event counts or trajectories."
+}

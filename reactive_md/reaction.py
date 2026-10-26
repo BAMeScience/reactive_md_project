@@ -218,6 +218,8 @@ def build_trial_forcefield(R, box, trial: dict, ff_ref: FFBundle):
         molecule_id=trial["molecule_id"],
         r_cut=float(ff_ref.nb_options.r_cut),
         dr_threshold=float(ff_ref.nb_options.dr_threshold),
+        use_shift_lj=ff_ref.nb_options.use_shift_lj,
+        energy_offset=trial.get("energy_offset"),
     )
 
 
