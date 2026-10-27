@@ -98,3 +98,24 @@ def test_synchronize_preserves_thermostat_chain_without_reset():
     np.testing.assert_allclose(np.asarray(state.momentum), [[8.] * 3, [12.] * 3])
     np.testing.assert_allclose(np.asarray(state.force), np.ones((2, 3)))
     assert ff.nlist is nlist
+
+
+def test_synchronize_fixed_coordinate_mh_preserves_momenta_exactly():
+    stepper = _stepper()
+    stepper.mass = jnp.asarray([2., 39.948])
+    stepper.set_forcefield = lambda ff: setattr(stepper, 'ff', ff)
+    stepper.allocate_valid_nlist = lambda positions: _neighbor()
+    stepper.refresh_force = lambda state, nl: replace(state, force=jnp.ones((2, 3)))
+    ff = SimpleNamespace(nlist=None)
+    initial_momenta = jnp.asarray([[0.25, -0.5, 0.75], [-0.636, 0.335, 1.29]])
+    state = replace(_state(), momentum=initial_momenta, velocity=initial_momenta)
+    outcome = ReactionOutcome(
+        key=None, positions=jnp.ones((2, 3)),
+        velocities=state.velocity, system=None, ff=ff,
+        events=('association',), preserve_momenta=True,
+    )
+    updated, _ = stepper.synchronize(state, outcome)
+    np.testing.assert_array_equal(np.asarray(updated.momentum),
+                                  np.asarray(initial_momenta))
+    assert updated.thermostat_chain == 'original'
+    np.testing.assert_array_equal(np.asarray(updated.position), np.ones((2, 3)))

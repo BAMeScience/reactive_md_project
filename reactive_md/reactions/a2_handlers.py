@@ -91,6 +91,7 @@ class A2MetropolisHandler:
             system=result.system,
             ff=result.ff,
             events=result.events,
+            preserve_momenta=True,
             metadata={
                 'attempts': result.attempts,
                 'n_association_candidates': result.n_association_candidates,

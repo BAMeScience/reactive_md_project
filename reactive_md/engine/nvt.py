@@ -136,10 +136,16 @@ class NVTStepper:
             state = self.init_nvt(key, outcome.positions, neighbor=nlist)
         else:
             state = replace(state, position=outcome.positions)
-        state = replace(
-            state,
-            momentum=jnp.asarray(outcome.velocities) * self.mass[:, None],
-        )
+        # Fixed-coordinate MC updates only topology and forces. Retain the
+        # exact integrator momentum; interpreting an unchanged velocity field
+        # as a fresh velocity can multiply momentum by the atomic mass.
+        # Legacy kinetic reactions still explicitly supply post-reaction
+        # velocities and retain their original conversion behavior.
+        if not outcome.preserve_momenta:
+            state = replace(
+                state,
+                momentum=jnp.asarray(outcome.velocities) * self.mass[:, None],
+            )
         state = self.refresh_force(state, nlist)
         self.ff.nlist = nlist
         return state, nlist

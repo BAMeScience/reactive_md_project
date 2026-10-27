@@ -37,6 +37,10 @@ class ReactionOutcome:
     ``reinitialize_thermostat`` is an explicit compatibility choice for
     legacy kinetic models that apply a separate post-reaction trajectory.
     Ordinary fixed-coordinate MC should leave it False.
+
+    ``preserve_momenta`` tells the NVT stepper that a reaction changes only
+    topology/forces, not particle momenta. This avoids a velocity-to-momentum
+    conversion when the handler did not apply any velocity impulse.
     """
 
     key: object
@@ -48,6 +52,7 @@ class ReactionOutcome:
     relaxation_time_ps: float = 0.0
     reinitialize_thermostat: bool = False
     metadata: object = None
+    preserve_momenta: bool = False
 
 
 class ReactionHandler(Protocol):
