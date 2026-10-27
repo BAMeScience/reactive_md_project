@@ -76,7 +76,6 @@ def langevin_relax_with_nlist(
         dt=dt_ps,
         kT=kT,
         gamma=gamma,
-        mass=mass,
     )
 
     def allocate_valid_nlist(positions, *, extra_capacity=0):
@@ -99,7 +98,7 @@ def langevin_relax_with_nlist(
     # initial force. Do not initialize with an overflowing list.
     nlist = allocate_valid_nlist(R)
     key, sub = jax.random.split(key)
-    state = init_fn(sub, R, neighbor=nlist)
+    state = init_fn(sub, R, mass=mass, neighbor=nlist)
     state = replace(
         state,
         momentum=jnp.asarray(velocities) * mass[:, None],

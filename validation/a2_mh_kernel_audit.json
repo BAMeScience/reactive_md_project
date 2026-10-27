@@ -1,0 +1,170 @@
+{
+  "stage": "two_atom_reference_and_reaction_kernel_audit",
+  "model": {
+    "box": 7.0,
+    "r_cut": 3.0,
+    "association_cutoff": 3.0,
+    "sigma": 1.2,
+    "epsilon": 0.2,
+    "bond_k": 1.5,
+    "bond_r0": 2.0,
+    "bond_offset": -0.5,
+    "temperature_k": 300.0,
+    "kb_real": 0.0019872041
+  },
+  "configurational_reference": {
+    "quadrature_order": 96,
+    "partition_unbound": 343.2565043250976,
+    "partition_bonded": 136.37330921679867,
+    "p_bonded": 0.28433034262347057,
+    "mean_r_unbound": 3.3767203048687477,
+    "mean_r_bonded": 2.189134647335294,
+    "model": {
+      "box": 7.0,
+      "r_cut": 3.0,
+      "association_cutoff": 3.0,
+      "sigma": 1.2,
+      "epsilon": 0.2,
+      "bond_k": 1.5,
+      "bond_r0": 2.0,
+      "bond_offset": -0.5,
+      "temperature_k": 300.0,
+      "kb_real": 0.0019872041
+    }
+  },
+  "cases": [
+    {
+      "distance": 2.0,
+      "periodic_edge": false,
+      "reference": {
+        "distance": 2.0,
+        "energy_unbound": -0.03558337413119999,
+        "energy_bonded": -0.5,
+        "delta_energy_association": -0.4644166258688,
+        "conditional_bonded_probability": 0.685467092610945,
+        "association_eligible": true,
+        "association_acceptance": 1.0,
+        "dissociation_acceptance": 0.4588592374157581,
+        "forward_flux": 0.5307523878703901,
+        "reverse_flux": 0.5307523878703903
+      },
+      "production_energies": {
+        "unbound": -0.03558337315917015,
+        "bonded": -0.5
+      },
+      "production_transitions": {
+        "association": {
+          "outcome": "accepted",
+          "probability": 1.0,
+          "delta_energy": -0.46441662684082985
+        },
+        "dissociation": {
+          "outcome": "accepted",
+          "probability": 0.45885923666759665,
+          "delta_energy": 0.46441662684082985
+        }
+      },
+      "status": "PASS"
+    },
+    {
+      "distance": 2.95,
+      "periodic_edge": false,
+      "reference": {
+        "distance": 2.95,
+        "energy_unbound": -0.003608056117152862,
+        "energy_bonded": 0.8537500000000005,
+        "delta_energy_association": 0.8573580561171533,
+        "conditional_bonded_probability": 0.1918349121106797,
+        "association_eligible": true,
+        "association_acceptance": 0.23737094683425855,
+        "dissociation_acceptance": 1.0,
+        "forward_flux": 0.11940595351885737,
+        "reverse_flux": 0.1194059535188574
+      },
+      "production_energies": {
+        "unbound": -0.003608057042583823,
+        "bonded": 0.8537501096725464
+      },
+      "production_transitions": {
+        "association": {
+          "outcome": "accepted",
+          "probability": 0.237370902797943,
+          "delta_energy": 0.8573581667151302
+        },
+        "dissociation": {
+          "outcome": "accepted",
+          "probability": 1.0,
+          "delta_energy": -0.8573581667151302
+        }
+      },
+      "status": "PASS"
+    },
+    {
+      "distance": 3.05,
+      "periodic_edge": false,
+      "reference": {
+        "distance": 3.05,
+        "energy_unbound": 0.0,
+        "energy_bonded": 1.1537499999999994,
+        "delta_energy_association": 1.1537499999999994,
+        "conditional_bonded_probability": 0.12616526306748985,
+        "association_eligible": false,
+        "association_acceptance": 0.0,
+        "dissociation_acceptance": 0.0,
+        "forward_flux": 0.0,
+        "reverse_flux": 0.0
+      },
+      "production_energies": {
+        "unbound": 0.0,
+        "bonded": 1.1537506580352783
+      },
+      "production_transitions": {
+        "association": {
+          "outcome": "no candidate",
+          "probability": 0.0
+        },
+        "dissociation": {
+          "outcome": "reverse move unavailable",
+          "probability": 0.0
+        }
+      },
+      "status": "PASS"
+    },
+    {
+      "distance": 2.0,
+      "periodic_edge": true,
+      "reference": {
+        "distance": 2.0,
+        "energy_unbound": -0.03558337413119999,
+        "energy_bonded": -0.5,
+        "delta_energy_association": -0.4644166258688,
+        "conditional_bonded_probability": 0.685467092610945,
+        "association_eligible": true,
+        "association_acceptance": 1.0,
+        "dissociation_acceptance": 0.4588592374157581,
+        "forward_flux": 0.5307523878703901,
+        "reverse_flux": 0.5307523878703903
+      },
+      "production_energies": {
+        "unbound": -0.03558337315917015,
+        "bonded": -0.5
+      },
+      "production_transitions": {
+        "association": {
+          "outcome": "accepted",
+          "probability": 1.0,
+          "delta_energy": -0.46441662684082985
+        },
+        "dissociation": {
+          "outcome": "accepted",
+          "probability": 0.45885923666759665,
+          "delta_energy": 0.46441662684082985
+        }
+      },
+      "status": "PASS"
+    }
+  ],
+  "production_physics_modified": false,
+  "status": "PASS",
+  "equilibrium_validated": false
+}

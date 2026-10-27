@@ -53,7 +53,6 @@ class NVTStepper:
             dt=cfg.dt,
             kT=cfg.kb_real * cfg.temperature_k,
             tau=cfg.tau_T,
-            mass=self.mass,
         )
         neighbor_fn = ff.neighbor_fn
 
@@ -87,7 +86,7 @@ class NVTStepper:
 
     def initialize(self, key, positions):
         self.ff.nlist = self.allocate_valid_nlist(positions)
-        return self.init_nvt(key, positions, neighbor=self.ff.nlist)
+        return self.init_nvt(key, positions,mass=self.mass ,neighbor=self.ff.nlist)
 
     def refresh_force(self, state, nlist):
         if not hasattr(state, 'force'):
@@ -133,7 +132,7 @@ class NVTStepper:
         if outcome.reinitialize_thermostat:
             if key is None:
                 raise ValueError('A PRNG key is required for thermostat reinitialization')
-            state = self.init_nvt(key, outcome.positions, neighbor=nlist)
+            state = self.init_nvt(key, outcome.positions, mass=self.mass, neighbor=nlist)
         else:
             state = replace(state, position=outcome.positions)
         # Fixed-coordinate MC updates only topology and forces. Retain the
