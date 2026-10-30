@@ -125,7 +125,8 @@ class NVTStepper:
         """Commit a reaction and refresh the force under the new topology.
 
         Existing momenta and Nose-Hoover chain state are retained by default.
-        The optional thermostat reset is used only for explicit legacy modes.
+        A paper A2 reaction with accepted Langevin relaxation explicitly
+        requests a thermostat reset and supplies relaxed velocities.
         """
         self.set_forcefield(outcome.ff)
         nlist = self.allocate_valid_nlist(outcome.positions)
@@ -135,11 +136,9 @@ class NVTStepper:
             state = self.init_nvt(key, outcome.positions, mass=self.mass, neighbor=nlist)
         else:
             state = replace(state, position=outcome.positions)
-        # Fixed-coordinate MC updates only topology and forces. Retain the
-        # exact integrator momentum; interpreting an unchanged velocity field
-        # as a fresh velocity can multiply momentum by the atomic mass.
-        # Legacy kinetic reactions still explicitly supply post-reaction
-        # velocities and retain their original conversion behavior.
+        # For topology-only handlers, preserve_momenta avoids a needless
+        # velocity-to-momentum conversion. Paper A2 handlers supply the
+        # relaxed velocities and explicitly request their handoff.
         if not outcome.preserve_momenta:
             state = replace(
                 state,

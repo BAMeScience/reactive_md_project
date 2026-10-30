@@ -34,13 +34,12 @@ class ReactionContext:
 class ReactionOutcome:
     """One reaction check, including any reaction-specific coordinate changes.
 
-    ``reinitialize_thermostat`` is an explicit compatibility choice for
-    legacy kinetic models that apply a separate post-reaction trajectory.
-    Ordinary fixed-coordinate MC should leave it False.
+    ``reinitialize_thermostat`` requests a new NVT thermostat state after a
+    committed reaction. Both A2 paper workflows use it when their separate
+    Langevin relaxation has modified particle velocities.
 
-    ``preserve_momenta`` tells the NVT stepper that a reaction changes only
-    topology/forces, not particle momenta. This avoids a velocity-to-momentum
-    conversion when the handler did not apply any velocity impulse.
+    ``preserve_momenta`` is for handlers that explicitly leave momenta
+    unchanged; the paper A2 workflows instead hand off relaxed velocities.
     """
 
     key: object

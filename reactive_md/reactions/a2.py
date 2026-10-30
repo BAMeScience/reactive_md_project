@@ -56,9 +56,14 @@ class A2Reaction:
 
     after unit conversion.
 
-    The constant energy offset V0 is intentionally not included here.
-    It does not affect forces and can later enter the Metropolis
-    correction separately.
+    The reaction-candidate distance cutoff must be supplied explicitly.
+    The paper suggests the first-neighbor-shell criterion, but does not
+    specify a numerical cutoff. Its 2.7 A barrier position belongs to
+    the PEL II reference model and is not a documented candidate cutoff.
+
+    The constant energy offset V0 is carried as bond_energy_offset.
+    The reactive-cycle force-field builder adds the total A2 offset to
+    the energy, while its derivative is zero.
     """
 
     def __init__(
@@ -67,7 +72,7 @@ class A2Reaction:
         a_indices,
         k_bond_jax: float,
         r0_bond: float,
-        association_cutoff: float = 2.7,
+        association_cutoff: float | None = None,
         bond_energy_offset: float = 0.0,
         association_displacement: float = 0.25,
         dissociation_displacement: float = 0.25,
@@ -79,6 +84,12 @@ class A2Reaction:
 
         self.k_bond_jax = float(k_bond_jax)
         self.r0_bond = float(r0_bond)
+        if association_cutoff is None:
+            raise ValueError(
+                "association_cutoff must be explicitly specified; "
+                "the paper does not report a numerical reaction-candidate cutoff. "
+                "Do not substitute the 2.7 A PEL II barrier position by default."
+            )
         self.association_cutoff = float(association_cutoff)
         self.bond_energy_offset = float(bond_energy_offset)
         self.association_displacement = float(association_displacement)

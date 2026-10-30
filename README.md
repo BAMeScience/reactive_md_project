@@ -1,3 +1,7 @@
+> **Phase 7:** Fixed-configuration MC energy audit: see [PHASE7_FIXED_CONFIGURATION_ENERGY_AUDIT.md](PHASE7_FIXED_CONFIGURATION_ENERGY_AUDIT.md). This is an optional diagnostic; the simulation algorithms are unchanged.
+
+> **rs@md paper reproduction status (2026-10-29):** The A2 `metropolis` path has been replaced by the paper's Figure 3a trial-relaxation/Metropolis workflow. The historical fixed-coordinate MH validation is **not** a validation of this algorithm. For scope, density, energy-mode audit, and HPC test commands see [PAPER_REPRODUCTION_STATUS.md](PAPER_REPRODUCTION_STATUS.md). PEL II and NPT are postponed. Phase 5 energy-source audit: [PAPER_SOURCE_CODE_AUDIT_PHASE5.md](PAPER_SOURCE_CODE_AUDIT_PHASE5.md).
+
 # reactive_md_project
 
 # reactive-md
@@ -532,3 +536,7 @@ production job without testing it in a separate environment.
 See [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) for the single-repository
 plugin refactor, compatibility guarantees, test results, and outstanding
 validation before production use.
+
+### Phase 6: Paired NVT pilot
+
+See [PHASE6_PAIRED_NVT_PILOT.md](PHASE6_PAIRED_NVT_PILOT.md) for a short, matched-initial-condition MC/rate diagnostic with explicit rate/cutoff inputs, MC attempt energies, and a machine-readable report. It is **not** a published NPT benchmark.

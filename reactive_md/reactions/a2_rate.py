@@ -164,12 +164,12 @@ def a2_rate_reactive_cycle(
     dissociation_rate_ps = float(dissociation_rate_ps)
     reactive_interval_ps = float(reactive_interval_ps)
 
-    if association_rate_ps < 0.0:
-        raise ValueError("association_rate_ps must be non-negative.")
-    if dissociation_rate_ps < 0.0:
-        raise ValueError("dissociation_rate_ps must be non-negative.")
-    if reactive_interval_ps <= 0.0:
-        raise ValueError("reactive_interval_ps must be positive.")
+    if not np.isfinite(association_rate_ps) or association_rate_ps < 0.0:
+        raise ValueError("association_rate_ps must be finite and non-negative.")
+    if not np.isfinite(dissociation_rate_ps) or dissociation_rate_ps < 0.0:
+        raise ValueError("dissociation_rate_ps must be finite and non-negative.")
+    if not np.isfinite(reactive_interval_ps) or reactive_interval_ps <= 0.0:
+        raise ValueError("reactive_interval_ps must be finite and positive.")
 
     p_assoc = association_rate_ps * reactive_interval_ps
     p_diss = dissociation_rate_ps * reactive_interval_ps
@@ -349,6 +349,9 @@ def a2_rate_reactive_cycle(
         raise RuntimeError(
             "A2 post-reaction Langevin relaxation produced non-finite velocities."
         )
+
+    if bool(np.asarray(nlist_relaxed.did_buffer_overflow)):
+        raise RuntimeError("A2 rate relaxation returned an overflowing neighbor list.")
 
     ff_trial.nlist = nlist_relaxed
     return A2RateResult(

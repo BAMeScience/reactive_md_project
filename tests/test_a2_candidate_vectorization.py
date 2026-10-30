@@ -116,6 +116,7 @@ def test_bonded_a_excluded_and_non_a_bond_ignored():
 def test_empty_and_single_free_a():
     reaction = A2Reaction(
         a_indices=[0, 1], k_bond_jax=1.0, r0_bond=1.5,
+        association_cutoff=2.7,
     )
     coords = jnp.asarray([[0, 0, 0], [1, 0, 0]], dtype=jnp.float32)
     disp = periodic_displacement(10.0)

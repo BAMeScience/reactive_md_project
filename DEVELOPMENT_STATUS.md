@@ -1,3 +1,7 @@
+> **Phase 5 update:** Original C++ source received and audited. MC now defaults to local-plus-solvation energy partition; see `PAPER_SOURCE_CODE_AUDIT_PHASE5.md`.
+
+> **Current algorithmic reproduction:** see [PAPER_REPRODUCTION_STATUS.md](PAPER_REPRODUCTION_STATUS.md). Earlier fixed-coordinate MH conclusions below are historical and do not certify the paper's rs@md[MC].
+
 # Single development repository — core-engine separation milestone
 
 This archive is the **only development repository**. The uploaded running

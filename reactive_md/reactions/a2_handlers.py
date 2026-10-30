@@ -67,7 +67,10 @@ class A2RateHandler:
 class A2MetropolisHandler:
     reaction: A2Reaction
     rng: np.random.Generator
-    association_proposal_probability: float = 0.5
+    relaxation_dt_ps: float = 0.00025
+    relaxation_time_ps: float = 1.0
+    relaxation_tau_ps: float = 0.01
+    energy_mode: str = "local_solvation"
 
     def attempt(self, context: ReactionContext) -> ReactionOutcome:
         result = a2_metropolis_reactive_cycle(
@@ -79,10 +82,15 @@ class A2MetropolisHandler:
             ff=context.ff,
             reaction=self.reaction,
             disp_fn=context.ff.disp_fn,
+            shift_fn=context.shift_fn,
+            masses=context.masses,
             temperature_k=context.temperature_k,
             kb_real=context.kb_real,
             rng=self.rng,
-            association_proposal_probability=self.association_proposal_probability,
+            relaxation_dt_ps=self.relaxation_dt_ps,
+            relaxation_time_ps=self.relaxation_time_ps,
+            relaxation_tau_ps=self.relaxation_tau_ps,
+            energy_mode=self.energy_mode,
         )
         return ReactionOutcome(
             key=result.key,
@@ -91,9 +99,11 @@ class A2MetropolisHandler:
             system=result.system,
             ff=result.ff,
             events=result.events,
-            preserve_momenta=True,
+            relaxation_time_ps=self.relaxation_time_ps if result.events else 0.0,
+            reinitialize_thermostat=bool(result.events),
             metadata={
                 'attempts': result.attempts,
+                'mc_energy_mode': self.energy_mode,
                 'n_association_candidates': result.n_association_candidates,
                 'n_dissociation_candidates': result.n_dissociation_candidates,
             },

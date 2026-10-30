@@ -51,6 +51,7 @@ def test_a2_association_adds_one_bond():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     candidate = A2AssociationCandidate(
@@ -93,6 +94,7 @@ def test_a2_dissociation_removes_bond_again():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     association = A2AssociationCandidate(
@@ -159,6 +161,7 @@ def test_a2_trial_preserves_unrelated_system_data():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     candidate = A2AssociationCandidate(
@@ -200,6 +203,7 @@ def test_a2_association_rejects_existing_bond():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     candidate = A2AssociationCandidate(
@@ -259,6 +263,7 @@ def test_find_association_candidates_finds_close_free_a_pair():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     R = jnp.array(
@@ -300,6 +305,7 @@ def test_find_association_candidates_finds_close_free_a_pair():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     R = jnp.array(
@@ -341,6 +347,7 @@ def test_find_association_candidates_excludes_bonded_a_atoms():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     assoc = A2AssociationCandidate(
@@ -415,6 +422,7 @@ def test_find_dissociation_candidates_returns_existing_a2_bond():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     assoc = A2AssociationCandidate(
@@ -497,6 +505,7 @@ def test_find_association_candidates_returns_unique_pairs():
         a_indices=np.array([0, 1, 2], dtype=np.int32),
         k_bond_jax=29.8757,
         r0_bond=1.5,
+        association_cutoff=2.7,
     )
 
     R = jnp.array(
@@ -524,3 +533,10 @@ def test_find_association_candidates_returns_unique_pairs():
     }
 
     assert len(pairs) == len(candidates)
+
+
+def test_candidate_cutoff_must_be_explicit():
+    import pytest
+    from reactive_md.reactions.a2 import A2Reaction
+    with pytest.raises(ValueError, match="explicitly specified"):
+        A2Reaction(a_indices=[0, 1], k_bond_jax=1.0, r0_bond=1.5)

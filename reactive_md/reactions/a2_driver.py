@@ -32,6 +32,12 @@ class A2MDRecordedEvent:
 
 
 @dataclass(frozen=True)
+class A2MDRecordedAttempt:
+    step: int
+    attempt: A2MCAttempt
+
+
+@dataclass(frozen=True)
 class A2MDSample:
     step: int
     md_time_ps: float
@@ -58,6 +64,7 @@ class A2MDRunResult:
     samples: tuple[A2MDSample, ...]
     attempted_mc_moves: int = 0
     rejected_mc_moves: int = 0
+    mc_attempt_history: tuple[A2MDRecordedAttempt, ...] = ()
 
 
 def _count_a2(system: SystemState, reaction: A2Reaction) -> int:
@@ -98,6 +105,7 @@ class A2OutputObserver:
         self.n_dissociation = 0
         self.attempted_mc_moves = 0
         self.rejected_mc_moves = 0
+        self.mc_attempt_history = []
         self.checks_seen = 0
         self.dump_frame_index = 0
         self.previous_position = None
@@ -201,6 +209,9 @@ class A2OutputObserver:
                                   self.unwrapped_position, system)
 
         attempts = metadata.get('attempts', ())
+        self.mc_attempt_history.extend(
+            A2MDRecordedAttempt(step=step, attempt=attempt) for attempt in attempts
+        )
         self.attempted_mc_moves += len(attempts)
         self.rejected_mc_moves += sum(not attempt.accepted for attempt in attempts)
         potential = float(observation.ff.energy_fn(
@@ -240,10 +251,10 @@ def run_md_nvt_a2(
     dissociation_rate_ps: float | None = None,
     rng: np.random.Generator | None = None,
     reaction_mode: str = 'rate',
-    mc_association_proposal_probability: float = 0.5,
     relaxation_dt_ps: float = 0.00025,
     relaxation_time_ps: float = 1.0,
     relaxation_tau_ps: float = 0.01,
+    mc_energy_mode: str = "local_solvation",
     rdf_observer=None,
     dump_file=None,
     dump_writer=None,
@@ -287,7 +298,10 @@ def run_md_nvt_a2(
     else:
         handler = A2MetropolisHandler(
             reaction=reaction, rng=rng,
-            association_proposal_probability=mc_association_proposal_probability,
+            relaxation_dt_ps=relaxation_dt_ps,
+            relaxation_time_ps=relaxation_time_ps,
+            relaxation_tau_ps=relaxation_tau_ps,
+            energy_mode=mc_energy_mode,
         )
     observer = A2OutputObserver(
         reaction=reaction, cfg=cfg, box=box, masses=masses,
@@ -312,4 +326,5 @@ def run_md_nvt_a2(
         samples=tuple(observer.samples),
         attempted_mc_moves=observer.attempted_mc_moves,
         rejected_mc_moves=observer.rejected_mc_moves,
+        mc_attempt_history=tuple(observer.mc_attempt_history),
     )
