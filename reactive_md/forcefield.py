@@ -30,7 +30,9 @@ def build_forcefield(
     charges, sigmas, epsilons,
     molecule_id,
     r_cut: float,
-    dr_threshold: float
+    dr_threshold: float,
+    use_shift_lj: bool | None = None,
+    energy_offset: float | None = None,
 ) -> FFBundle:
     """
     Construct Topology, Parameters, energy_fn, neighbor_fn, disp_fn, and allocate nlist.
@@ -74,9 +76,28 @@ def build_forcefield(
     params = Parameters(bonded=bonded_params, nonbonded=nonbonded_params)
 
     coulomb_handler = CutoffCoulomb(r_cut=r_cut)
-    nb_options = NonbondedOptions(r_cut=r_cut, dr_threshold=dr_threshold)
+    nb_kwargs = {
+      "r_cut": r_cut,
+      "dr_threshold": dr_threshold,
+    }
+
+    if use_shift_lj is not None:
+       nb_kwargs["use_shift_lj"] = use_shift_lj
+
+    nb_options = NonbondedOptions(**nb_kwargs)
 
     energy_fn, neighbor_fn, disp_fn = oplsaa.energy(topo, params, box, coulomb_handler, nb_options)
+    if energy_offset is not None:
+       base_energy_fn = energy_fn
+       offset = jnp.asarray(energy_offset)
+
+       def energy_fn(positions, nlist):
+           energies = base_energy_fn(positions, nlist)
+           return {
+              **energies,
+              "offset": offset,
+              "total": energies["total"] + offset,
+           }
     nlist = neighbor_fn.allocate(R)
 
     return FFBundle(

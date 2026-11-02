@@ -21,7 +21,7 @@ from .reaction import (
     maybe_react_one_event,
     maybe_react_rate_events,
 )
-from .md_driver import run_md_nvt_with_reactions
+from .reactions.lipf6_driver import run_md_nvt_with_reactions
 from .lammps_io import write_lammps_dump_frame
 
 

@@ -1,209 +1,28 @@
-# reactive_md/md_driver.py
+"""Stable chemistry-independent entry point for reactive NVT dynamics.
+
+Core data contracts live in :mod:`reactive_md.engine.contracts`; the
+Nose-Hoover stepper lives in :mod:`reactive_md.engine.nvt`.  The generic
+orchestration below deliberately knows nothing about A2 or LiPF6.
+
+Historical chemistry-specific entry points remain available lazily.
+"""
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
-from functools import partial
+from typing import TYPE_CHECKING
 
-import numpy as np
 import jax
-import jax.numpy as jnp
-from jax_md import simulate
 
 from .config import SimConfig
-from .forcefield import FFBundle
-from .reaction import SystemState
+from .engine import (
+    ReactionContext, ReactionOutcome, ReactionHandler,
+    MDObservation, MDObserver, MDRunResult, NVTStepper,
+)
+
+if TYPE_CHECKING:
+    from .forcefield import FFBundle
 
 
-@dataclass
-class RunResult:
-    final_md_state: object
-    ff: FFBundle
-    sys: SystemState
-    accepted_events: int
-
-
-def _write_dump_frame_if_requested(
-    *,
-    dump_file,
-    dump_writer,
-    step: int,
-    box,
-    atom_ids,
-    atom_types,
-    masses,
-    wrapped_positions,
-    unwrapped_positions,
-):
-    if dump_file is None or dump_writer is None:
-        return
-
-    dump_writer(
-        file=dump_file,
-        step=step,
-        box=box,
-        atom_ids=atom_ids,
-        atom_types=atom_types,
-        masses=np.asarray(masses),
-        wrapped_positions=np.asarray(jax.device_get(wrapped_positions)),
-        unwrapped_positions=np.asarray(jax.device_get(unwrapped_positions)),
-    )
-    dump_file.flush()
-
-
-def _write_event_header(event_file):
-    if event_file is None:
-        return
-
-    event_file.write(
-        "step,event,event_index,mode,n_candidates,n_accepted_this_check,"
-        "p_rate,k_rate_ps,dt_reactive_ps,"
-        "pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,sigma,dE,p_acc,p_sigma,p_metropolis,p_total,reacted_count\n"
-    )
-    event_file.flush()
-
-
-def _write_rate_check(
-    *,
-    event_file,
-    step: int,
-    info: dict,
-    reacted_count: int,
-):
-    if event_file is None:
-        return
-    if info.get("mode") != "rate":
-        return
-
-    event_file.write(
-        f"{step},rate_check,,rate,"
-        f"{info.get('n_candidates', '')},"
-        f"{info.get('n_accepted_this_check', 0)},"
-        f"{info.get('p_rate', '')},"
-        f"{info.get('k_rate_ps', '')},"
-        f"{info.get('dt_reactive_ps', '')},"
-        ",,,,,,,,,,,"
-        f"{reacted_count}\n"
-    )
-    event_file.flush()
-
-
-def _write_accepted_event(
-    *,
-    event_file,
-    step: int,
-    event_index: int,
-    info: dict,
-    reacted_count: int,
-):
-    if event_file is None:
-        return
-
-    event = info.get("accepted_event", {})
-    d_lif = event.get("d_lif")
-    d_pf = event.get("d_pf")
-
-    sigma = event.get("sigma", "")
-    if sigma == "" and d_lif is not None and d_pf is not None:
-        sigma = float(d_pf) - float(d_lif)
-
-    event_file.write(
-        f"{step},accepted,{event_index},"
-        f"{info.get('mode', 'metropolis')},"
-        f"{info.get('n_candidates', '')},"
-        f"{info.get('n_accepted_this_check', 1)},"
-        f"{info.get('p_rate', '')},"
-        f"{info.get('k_rate_ps', '')},"
-        f"{info.get('dt_reactive_ps', '')},"
-        f"{event.get('k_pf6')},"
-        f"{event.get('li_idx')},"
-        f"{event.get('leave_F')},"
-        f"{d_lif},"
-        f"{d_pf},"
-        f"{sigma},"
-        f"{info.get('dE', '')},"
-        f"{info.get('p_acc', '')},"
-        f"{info.get('p_sigma', '')},"
-        f"{info.get('p_metropolis', '')},"
-        f"{info.get('p_total', '')},"
-        f"{reacted_count}\n"
-    )
-    event_file.flush()
-
-
-def _write_candidate_header(candidate_file):
-    if candidate_file is None:
-        return
-
-    candidate_file.write(
-        "step,mode,rank,pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,sigma,accepted\n"
-    )
-    candidate_file.flush()
-
-
-def _write_candidate_records(
-    *,
-    candidate_file,
-    step: int,
-    info: dict,
-):
-    if candidate_file is None:
-        return
-
-    mode = info.get("mode", "metropolis")
-
-    accepted_events = info.get("accepted_events")
-    if accepted_events is None:
-        accepted_event = info.get("accepted_event")
-        accepted_events = (
-            [accepted_event]
-            if accepted_event is not None
-            else []
-        )
-
-    accepted_keys = {
-        (
-            event.get("k_pf6"),
-            event.get("li_idx"),
-            event.get("leave_F"),
-        )
-        for event in accepted_events
-    }
-
-    for rec in info.get("candidate_records", []):
-        key = (
-            rec.get("k_pf6"),
-            rec.get("li_idx"),
-            rec.get("leave_F"),
-        )
-
-        accepted = int(key in accepted_keys)
-
-        sigma = rec.get("sigma")
-        if sigma is None:
-            d_lif = rec.get("d_lif")
-            d_pf = rec.get("d_pf")
-            if d_lif is not None and d_pf is not None:
-                sigma = float(d_pf) - float(d_lif)
-            else:
-                sigma = ""
-
-        candidate_file.write(
-            f"{step},{mode},{rec.get('rank')},"
-            f"{rec.get('k_pf6')},"
-            f"{rec.get('li_idx')},"
-            f"{rec.get('leave_F')},"
-            f"{rec.get('d_lif')},"
-            f"{rec.get('d_pf')},"
-            f"{sigma},"
-            f"{accepted}\n"
-        )
-
-    candidate_file.flush()
-
-
-def run_md_nvt_with_reactions(
+def run_md_nvt(
     key,
     *,
     cfg: SimConfig,
@@ -211,353 +30,101 @@ def run_md_nvt_with_reactions(
     masses,
     shift_fn,
     ff: FFBundle,
-    sys: SystemState,
-    reaction_step_fn,
+    sys: object,
+    reaction_handler: ReactionHandler,
     box=None,
-    atom_ids=None,
-    atom_types=None,
-    dump_file=None,
-    dump_writer=None,
-    event_file=None,
-    candidate_file=None,
-):
-    kT = cfg.kb_real * cfg.temperature_k
-    mass = jnp.asarray(masses)
+    observers: tuple[MDObserver, ...] = (),
+) -> MDRunResult:
+    """Generic NVT driver. Adding chemistry does not require editing it.
 
-    batched_disp_fn = jax.vmap(ff.disp_fn, in_axes=(0, 0))
-
-    def make_integrator(energy_fn):
-        def energy_scalar(R, neighbor):
-            return energy_fn(R, neighbor)["total"]
-
-        init_nvt, apply_nvt = simulate.nvt_nose_hoover(
-            energy_scalar,
-            shift_fn,
-            dt=cfg.dt,
-            kT=kT,
-            tau=cfg.tau_T,
-            mass=mass,
-        )
-        return init_nvt, apply_nvt
-
-    def make_md_chunk(apply_nvt, neighbor_fn):
-        @partial(jax.jit, static_argnames=("chunk",))
-        def md_chunk(md_state, nlist, chunk: int):
-            def body_fn(carry, _):
-                st, nl = carry
-                nl = neighbor_fn.update(st.position, nl)
-                st = apply_nvt(st, neighbor=nl)
-                return (st, nl), None
-
-            (st_out, nl_out), _ = jax.lax.scan(
-                body_fn,
-                (md_state, nlist),
-                xs=None,
-                length=chunk,
-            )
-            return st_out, nl_out
-
-        return md_chunk
-
-    init_nvt, apply_nvt = make_integrator(ff.energy_fn)
-    md_chunk = make_md_chunk(apply_nvt, ff.neighbor_fn)
-
+    Handlers may update positions, velocities, force fields and topology, but
+    must return the original objects when no reaction is accepted. Observer
+    callbacks receive post-check snapshots; step zero is included.
+    """
+    if cfg.steps < 0 or cfg.max_events < 0:
+        raise ValueError('steps and max_events must be nonnegative')
+    stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
     key, sub = jax.random.split(key)
-    md_state = init_nvt(sub, init_positions, neighbor=ff.nlist)
-
-    unwrapped_position = jnp.array(init_positions)
-    previous_position = jnp.array(init_positions)
-
-    dump_every = cfg.dump_every
-    if dump_every is None:
-        dump_every = cfg.check_every
-
-    _write_event_header(event_file)
-    _write_candidate_header(candidate_file)
-
-    _write_dump_frame_if_requested(
-        dump_file=dump_file,
-        dump_writer=dump_writer,
-        step=0,
-        box=box,
-        atom_ids=atom_ids,
-        atom_types=atom_types,
-        masses=masses,
-        wrapped_positions=md_state.position,
-        unwrapped_positions=unwrapped_position,
-    )
-
+    state = stepper.initialize(sub, init_positions)
     accepted_events = 0
     steps_done = 0
+    relaxation_elapsed = 0.0
 
+    def notify(outcome=None, pre_positions=None):
+        observation = MDObservation(
+            step=steps_done,
+            md_time_ps=steps_done * float(cfg.dt),
+            relaxation_time_ps=relaxation_elapsed,
+            state=state,
+            ff=ff,
+            system=sys,
+            outcome=outcome,
+            pre_reaction_positions=pre_positions,
+        )
+        for observer in observers:
+            observer.on_observation(observation)
+
+    notify()
     while steps_done < cfg.steps and accepted_events < cfg.max_events:
         chunk = min(int(cfg.check_every), int(cfg.steps - steps_done))
-
-        md_state, ff.nlist = md_chunk(md_state, ff.nlist, chunk)
+        state, ff.nlist = stepper.advance(state, ff.nlist, chunk=chunk)
         steps_done += chunk
-
-        displacement = batched_disp_fn(previous_position, md_state.position)
-        unwrapped_position = unwrapped_position + displacement
-        previous_position = md_state.position
-
-        positions = md_state.position
-        velocities = md_state.velocity
-
-        E_dict = ff.energy_fn(positions, ff.nlist)
-        E_total = E_dict["total"]
-        E_total.block_until_ready()
-        PE = float(E_total)
-
-        KE_arr = 0.5 * jnp.sum(mass[:, None] * velocities * velocities)
-        KE_arr.block_until_ready()
-        KE = float(KE_arr)
-
-        reacted = int(jnp.sum(sys.pf6_reacted))
-        print(f"[step {steps_done:6d}] PE={PE: .6f} KE={KE: .6f} reacted={reacted}")
-
-        if steps_done % int(dump_every) == 0:
-            _write_dump_frame_if_requested(
-                dump_file=dump_file,
-                dump_writer=dump_writer,
-                step=steps_done,
-                box=box,
-                atom_ids=atom_ids,
-                atom_types=atom_types,
-                masses=masses,
-                wrapped_positions=md_state.position,
-                unwrapped_positions=unwrapped_position,
-            )
-
-        key, accepted, ff_new, sys_new, info, R_new = reaction_step_fn(
-            key,
-            positions,
-            ff,
-            sys,
-        )
-
-        
-        reacted_count_after_check = int(
-            jnp.sum(
-            sys_new.pf6_reacted
-            if accepted
-            else sys.pf6_reacted
-            )
-        )
-
-        _write_candidate_records(
-            candidate_file=candidate_file,
+        before = state.position
+        # Optional pre-reaction observation: chemistry-specific diagnostics and
+        # periodic trajectory frames must see the old topology and force field.
+        # The regular on_observation callback remains post-reaction so existing
+        # observers (including A2) retain their original contract.
+        before_observation = MDObservation(
             step=steps_done,
-            info=info,
+            md_time_ps=steps_done * float(cfg.dt),
+            relaxation_time_ps=relaxation_elapsed,
+            state=state,
+            ff=ff,
+            system=sys,
+            outcome=None,
+            pre_reaction_positions=before,
         )
-        
-        
-        if accepted:
-            events_this_check = info.get("accepted_events")
-
-            if events_this_check is None:
-               event = info.get("accepted_event")
-               events_this_check = (
-                  [event]
-                  if event is not None
-                  else []
-               )
-
-            accepted_before_check = accepted_events
-            reacted_before_check = int(jnp.sum(sys.pf6_reacted))
-
-            accepted_events += len(events_this_check)
-            reacted_count_new = int(jnp.sum(sys_new.pf6_reacted))
-  
-            if info.get("mode") == "rate":
-               for batch_index, event in enumerate(
-                   events_this_check,
-                   start=1,
-               ):
-                   event_index = accepted_before_check + batch_index
-                   reacted_count_for_event = reacted_before_check + batch_index
-
-                   d_lif = event.get("d_lif")
-                   d_pf = event.get("d_pf")
-                   sigma = event.get("sigma")
-
-                   if sigma is None and d_lif is not None and d_pf is not None:
-                      sigma = float(d_pf) - float(d_lif)
-
-                   sigma_text = ""
-                   if sigma is not None:
-                      sigma_text = f", sigma={float(sigma):.3f}"
-
-                   print(
-                      f"[step {steps_done}] RATE EVENT accepted "
-                      f"event #{event_index}: "
-                      f"pf6={event.get('k_pf6')}, "
-                      f"Li={event.get('li_idx')}, "
-                      f"F={event.get('leave_F')}, "
-                      f"d_LiF={float(d_lif):.3f}, "
-                      f"d_PF={float(d_pf):.3f}"
-                      f"{sigma_text}, "
-                      f"p_rate={float(event.get('p_rate')):.4f}, "
-                      f"n_candidates={info.get('n_candidates')}, "
-                      f"n_accepted_this_check="
-                      f"{info.get('n_accepted_this_check')}"
-                   )
-
-                   event_info = dict(info)
-                   event_info["accepted_event"] = event
-                   event_info["p_rate"] = event.get(
-                       "p_rate",
-                       info.get("p_rate"),
-                   )
-                   event_info["k_eff_ps"] = event.get(
-                       "k_eff_ps",
-                       info.get("k_eff_ps"),
-                   )
-                   event_info["pf_rate_factor"] = event.get(
-                       "pf_rate_factor",
-                       info.get("pf_rate_factor"),
-                   )
-
-                   _write_accepted_event(
-                       event_file=event_file,
-                       step=steps_done,
-                       event_index=event_index,
-                       info=event_info,
-                       reacted_count=reacted_count_for_event,
-                   )
-
+        for observer in observers:
+            before_callback = getattr(observer, 'on_before_reaction', None)
+            if before_callback is not None:
+                before_callback(before_observation)
+        outcome = reaction_handler.attempt(ReactionContext(
+            key=key,
+            step=steps_done,
+            interval_ps=chunk * float(cfg.dt),
+            positions=state.position,
+            velocities=state.velocity,
+            system=sys,
+            ff=ff,
+            box=box,
+            shift_fn=shift_fn,
+            masses=stepper.mass,
+            temperature_k=cfg.temperature_k,
+            kb_real=cfg.kb_real,
+        ))
+        key = outcome.key
+        if outcome.events:
+            accepted_events += len(outcome.events)
+            ff, sys = outcome.ff, outcome.system
+            if outcome.reinitialize_thermostat:
+                key, sub = jax.random.split(key)
             else:
-               event = events_this_check[0]
-
-               d_lif = event.get("d_lif")
-               d_pf = event.get("d_pf")
-               sigma = event.get("sigma")
-
-               if sigma is None and d_lif is not None and d_pf is not None:
-                  sigma = float(d_pf) - float(d_lif)
-
-               sigma_text = ""
-               if sigma is not None:
-                  sigma_text = f", sigma={float(sigma):.3f}"
-
-               print(
-                  f"[step {steps_done}] TOPOLOGY CHANGE accepted "
-                  f"event #{accepted_events}: "
-                  f"pf6={event.get('k_pf6')}, "
-                  f"Li={event.get('li_idx')}, "
-                  f"F={event.get('leave_F')}, "
-                  f"d_LiF={float(d_lif):.3f}, "
-                  f"d_PF={float(d_pf):.3f}"
-                  f"{sigma_text}, "
-                  f"dE={float(info.get('dE')):.4f}, "
-                  f"p_sigma={float(info.get('p_sigma')):.3f}, "
-                  f"pM={float(info.get('p_metropolis')):.3f}, "
-                  f"p={float(info.get('p_total', info.get('p_acc'))):.3f}"
-               )
-
-               _write_accepted_event(
-                   event_file=event_file,
-                   step=steps_done,
-                   event_index=accepted_events,
-                   info=info,
-                   reacted_count=reacted_count_new,
-               )
-            
-
-            ff = ff_new
-            sys = sys_new
-            batched_disp_fn = jax.vmap(ff.disp_fn, in_axes=(0, 0))
-
-            reaction_displacement = batched_disp_fn(previous_position, R_new)
-            unwrapped_position = unwrapped_position + reaction_displacement
-            previous_position = R_new
-
-            md_state = replace(md_state, position=R_new)
-            ff.nlist = ff.neighbor_fn.allocate(R_new)
-
-            _write_dump_frame_if_requested(
-                dump_file=dump_file,
-                dump_writer=dump_writer,
-                step=steps_done,
-                box=box,
-                atom_ids=atom_ids,
-                atom_types=atom_types,
-                masses=masses,
-                wrapped_positions=md_state.position,
-                unwrapped_positions=unwrapped_position,
-            )
-
-            init_nvt, apply_nvt = make_integrator(ff.energy_fn)
-            md_chunk = make_md_chunk(apply_nvt, ff.neighbor_fn)
-
-        else:
-            if "candidate" in info:
-                cand_info = info["candidate"]
-                sigma = cand_info.get("sigma")
-                if sigma is None:
-                    sigma = float(cand_info["d_pf"]) - float(cand_info["d_lif"])
-
-                extra = ""
-                if "dE" in info:
-                    extra += f", dE={float(info['dE']):.4f}"
-                if "p_sigma" in info:
-                    extra += f", p_sigma={float(info['p_sigma']):.3f}"
-                if "p_metropolis" in info:
-                    extra += f", pM={float(info['p_metropolis']):.3f}"
-                if "p_total" in info:
-                    extra += f", p_total={float(info['p_total']):.3f}"
-                elif "p_acc" in info:
-                    extra += f", p_acc={float(info['p_acc']):.3f}"
-
-                print(
-                    " No reaction accepted for candidate: "
-                    f"pf6={cand_info['k_pf6']}, Li={cand_info['li_idx']}, "
-                    f"F={cand_info['leave_F']}, "
-                    f"d_LiF={cand_info['d_lif']:.3f}, "
-                    f"d_PF={cand_info['d_pf']:.3f}, "
-                    f"sigma={float(sigma):.3f}"
-                    f"{extra}"
-                )
-            elif "best_sigma_candidate" in info:
-                best = info["best_sigma_candidate"]
-                sigma = best.get("sigma")
-                if sigma is None:
-                    sigma = float(best["d_pf"]) - float(best["d_lif"])
-                print(
-                    " No reaction accepted. "
-                    f"Best sigma candidate: Li={best['li_idx']}, "
-                    f"F={best['leave_F']}, "
-                    f"d_LiF={best['d_lif']:.3f}, "
-                    f"d_PF={best['d_pf']:.3f}, "
-                    f"sigma={float(sigma):.3f}"
-                )
-            elif "closest" in info:
-                closest = info["closest"]
-                sigma = closest.get("sigma")
-                if sigma is None:
-                    sigma = float(closest["d_pf"]) - float(closest["d_lif"])
-                print(
-                    " No reaction accepted. "
-                    f"Diagnostic candidate: Li={closest['li_idx']}, "
-                    f"F={closest['leave_F']}, "
-                    f"d_LiF={closest['d_lif']:.3f}, "
-                    f"d_PF={closest['d_pf']:.3f}, "
-                    f"sigma={float(sigma):.3f}"
-                )
-
-        _write_rate_check(
-            event_file=event_file,
-            step=steps_done,
-            info=info,
-            reacted_count=reacted_count_after_check,
-        )
-
-    print("Done.")
-    print(f"Total accepted events: {accepted_events}")
-    print(f"PF6 reacted count: {int(jnp.sum(sys.pf6_reacted))}")
-
-    return RunResult(
-        final_md_state=md_state,
-        ff=ff,
-        sys=sys,
-        accepted_events=accepted_events,
+                sub = None
+            state, ff.nlist = stepper.synchronize(state, outcome, key=sub)
+            relaxation_elapsed += float(outcome.relaxation_time_ps)
+        notify(outcome, before)
+    return MDRunResult(
+        state, ff, sys, accepted_events, steps_done, key, relaxation_elapsed
     )
+
+
+# Compatibility with imports from versions where chemistry lived in this file.
+# Kept lazy to avoid importing chemistry into the generic MD engine.
+def __getattr__(name):
+    if name == 'run_md_nvt_with_reactions' or name == 'RunResult':
+        from .reactions import lipf6_driver
+        return getattr(lipf6_driver, name)
+    if name in ('run_md_nvt_a2', 'A2MDRecordedEvent', 'A2MDSample', 'A2MDRunResult'):
+        from .reactions import a2_driver
+        return getattr(a2_driver, name)
+    raise AttributeError(name)
