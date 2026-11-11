@@ -26,6 +26,13 @@ class SimConfig:
     activation_energy_eV: float | None = None
     prefactor_ps: float | None = None
     max_reactions_per_check: int = 1
+    reverse_rate_ps: float = 0.0
+    allow_reverse_mc: bool = False
+
+    # Post-reaction Langevin relaxation (same defaults as validated A2).
+    relaxation_dt_ps: float = 0.00025
+    relaxation_time_ps: float = 5.0
+    relaxation_tau_ps: float = 0.01
 
     # Thermodynamic / force-field settings
     temperature_k: float = 400.0

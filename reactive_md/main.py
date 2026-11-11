@@ -31,7 +31,7 @@ def _open_text_output(path: str):
     return open(path, "w")
 
 
-def main(cfg: SimConfig):
+def main(cfg: SimConfig, *, reaction_step_factory=None):
     (
         positions,
         bonds,
@@ -171,6 +171,8 @@ def main(cfg: SimConfig):
         epsilons=jnp.array(epsilons),
         molecule_id=jnp.array(molecule_id, dtype=int),
         pf6_reacted=jnp.zeros((pf6_atoms.shape[0],), dtype=jnp.bool_),
+        pf6_leave_f=jnp.full((pf6_atoms.shape[0],), -1, dtype=jnp.int32),
+        pf6_li_partner=jnp.full((pf6_atoms.shape[0],), -1, dtype=jnp.int32),
     )
 
     pf5 = make_pf5_template()
@@ -186,6 +188,8 @@ def main(cfg: SimConfig):
        f_type=cfg.f_type,
        li_type=cfg.li_type,
     )  
+
+    reaction.set_reference_state(sys)
 
     mc_energy_evaluator = None
 
@@ -246,7 +250,7 @@ def main(cfg: SimConfig):
         print("Metropolis energy: classical force field")
         beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
-    def reaction_step_fn(key, R, ff_in, sys_in):
+    def reaction_step_fn(key, R, ff_in, sys_in, velocities):
         if cfg.reaction_mode == "rate":
             return maybe_react_rate_events(
                 key,
@@ -265,6 +269,11 @@ def main(cfg: SimConfig):
                 candidate_log_top_n=cfg.candidate_log_top_n,
                 sigma_mid=cfg.sigma_mid,
                 sigma_width=cfg.sigma_width,
+                velocities=velocities, masses=masses, kb_real=cfg.kb_real,
+                relaxation_dt_ps=cfg.relaxation_dt_ps,
+                relaxation_time_ps=cfg.relaxation_time_ps,
+                relaxation_tau_ps=cfg.relaxation_tau_ps,
+                reverse_rate_ps=cfg.reverse_rate_ps,
             )
 
         return maybe_react_one_event(
@@ -280,6 +289,18 @@ def main(cfg: SimConfig):
             sigma_width=cfg.sigma_width,
             mc_energy_evaluator=mc_energy_evaluator,
             candidate_log_top_n=cfg.candidate_log_top_n,
+            velocities=velocities, masses=masses,
+            temperature_k=cfg.temperature_k, kb_real=cfg.kb_real,
+            relaxation_dt_ps=cfg.relaxation_dt_ps,
+            relaxation_time_ps=cfg.relaxation_time_ps,
+            relaxation_tau_ps=cfg.relaxation_tau_ps,
+            allow_reverse=cfg.allow_reverse_mc,
+        )
+
+    if reaction_step_factory is not None:
+        reaction_step_fn = reaction_step_factory(
+            reaction=reaction, box=box, shift_fn=shift_fn,
+            masses=masses, cfg=cfg, initial_system=sys,
         )
 
     key = jax.random.PRNGKey(cfg.prng_seed)
@@ -314,7 +335,10 @@ def main(cfg: SimConfig):
             dump_writer=write_lammps_dump_frame if dump_file is not None else None,
             event_file=event_file,
             candidate_file=candidate_file,
+            passes_velocities=True,
         )
+
+    return _result
 
 
 def cli():
@@ -352,6 +376,14 @@ def cli():
         type=float,
         default=default_cfg.prefactor_ps,
     )
+
+    parser.add_argument("--reverse-rate-ps", type=float, default=0.0,
+                        help="Optional reverse recombination rate (ps^-1); default off")
+    parser.add_argument("--allow-reverse-mc", action="store_true",
+                        help="Enable exploratory reverse Metropolis proposals")
+    parser.add_argument("--relaxation-dt-ps", type=float, default=default_cfg.relaxation_dt_ps)
+    parser.add_argument("--relaxation-time-ps", type=float, default=default_cfg.relaxation_time_ps)
+    parser.add_argument("--relaxation-tau-ps", type=float, default=default_cfg.relaxation_tau_ps)
 
     parser.add_argument(
         "--max-reactions-per-check",
@@ -423,6 +455,11 @@ def cli():
         activation_energy_eV=args.activation_energy_eV,
         prefactor_ps=args.prefactor_ps,
         max_reactions_per_check=args.max_reactions_per_check,
+        reverse_rate_ps=args.reverse_rate_ps,
+        allow_reverse_mc=args.allow_reverse_mc,
+        relaxation_dt_ps=args.relaxation_dt_ps,
+        relaxation_time_ps=args.relaxation_time_ps,
+        relaxation_tau_ps=args.relaxation_tau_ps,
         temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,
         dump_file=(
@@ -454,3 +491,4 @@ def cli():
 
 if __name__ == "__main__":
     cli()
+

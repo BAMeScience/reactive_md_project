@@ -21,6 +21,7 @@ class ReactionCandidate:
     leave_F: int
     d_lif: float
     d_pf: float
+    direction: str = "forward"
 
 
 @dataclass
@@ -67,6 +68,7 @@ class LiPF6Reaction:
     p_type: int
     f_type: int
     li_type: int
+    reference_system: Any = None
 
     def __post_init__(self) -> None:
         """Normalize arrays and validate their basic shapes."""
@@ -147,6 +149,101 @@ class LiPF6Reaction:
             f_type=int(f_type),
             li_type=int(li_type),
         )
+
+    def set_reference_state(self, system: Any) -> None:
+        """Snapshot the unreacted PF6 topology and per-atom parameters.
+
+        Required for exact restoration of the input PF6 force field. Call
+        once, before any reaction is attempted.
+        """
+        self.reference_system = {
+            name: tuple(np.asarray(part).copy() for part in getattr(system, name))
+            for name in ("bonds", "angles", "torsions", "impropers")
+        }
+        for name in ("charges", "sigmas", "epsilons", "molecule_id"):
+            self.reference_system[name] = np.asarray(getattr(system, name)).copy()
+
+    def find_reverse_candidates(
+        self, R, disp_fn, *, pf6_reacted, pf6_leave_f,
+        pf6_li_partner, max_pf_distance: float = 4.0,
+        max_lif_distance: float = 4.0,
+    ) -> list[ReactionCandidate]:
+        """Recombine only the recorded leaving F with its original PF5.
+
+        Distance cutoffs prevent rebuilding a very long P-F bond. The Li
+        partner is tracked explicitly because LiF has no bonded topology.
+        """
+        reacted = np.asarray(pf6_reacted, dtype=bool)
+        leaves = np.asarray(pf6_leave_f, dtype=np.int32)
+        partners = np.asarray(pf6_li_partner, dtype=np.int32)
+        if reacted.shape != (len(self.pf6_atoms),) or leaves.shape != reacted.shape or partners.shape != reacted.shape:
+            raise ValueError("Reverse-reaction state arrays have inconsistent shapes")
+        positions = jnp.asarray(R)
+        candidates = []
+        for k in np.flatnonzero(reacted):
+            f, li = int(leaves[k]), int(partners[k])
+            if f < 0 or li < 0:
+                continue
+            if f not in self.pf6_atoms[k, 1:] or li not in self.li_atoms:
+                raise ValueError("Invalid recorded LiPF6 reaction partners")
+            p = int(self.pf6_atoms[k, 0])
+            d_pf = _distance(disp_fn, positions, p, f)
+            d_lif = _distance(disp_fn, positions, li, f)
+            if d_pf <= max_pf_distance and d_lif <= max_lif_distance:
+                candidates.append(ReactionCandidate(int(k), li, f, d_lif, d_pf, "reverse"))
+        candidates.sort(key=lambda c: reaction_coordinate(d_pf=c.d_pf, d_lif=c.d_lif))
+        return candidates
+
+    def build_reverse_trial(self, system: Any, candidate: ReactionCandidate):
+        """Restore original PF6 bonded terms and nonbonded parameters."""
+        self._validate_candidate(candidate)
+        if self.reference_system is None:
+            raise RuntimeError("set_reference_state() is required for reverse reactions")
+        ref = self.reference_system
+        k = int(candidate.k_pf6)
+        pf6_row = self.pf6_atoms[k]
+        p, f, li = int(pf6_row[0]), int(candidate.leave_F), int(candidate.li_idx)
+        molecule_id = np.asarray(system.molecule_id, dtype=np.int32).copy()
+        pf6_molid = int(ref["molecule_id"][p])
+        restored = {}
+        for name in ("bonds", "angles", "torsions", "impropers"):
+            terms = tuple(np.asarray(x) for x in getattr(system, name))
+            idx, values = remove_terms_in_molid(terms[0], list(terms[1:]), molecule_id, pf6_molid)
+            reference_terms = ref[name]
+            original_molids = ref["molecule_id"][reference_terms[0]]
+            mask = np.all(original_molids == pf6_molid, axis=1)
+            restored[name] = tuple(
+                [np.concatenate((idx, reference_terms[0][mask]), axis=0)]
+                + [np.concatenate((v, reference_terms[i][mask]), axis=0)
+                   for i, v in enumerate(values, start=1)]
+            )
+        restored["molecule_id"] = molecule_id
+        restored["molecule_id"][f] = ref["molecule_id"][f]
+        for name in ("charges", "sigmas", "epsilons"):
+            values = np.asarray(getattr(system, name)).copy()
+            values[pf6_row] = ref[name][pf6_row]
+            values[li] = ref[name][li]
+            restored[name] = values
+        return restored, pf6_molid
+
+    def prepare_reverse_probe(self, R, candidate, *, disp_fn, shift_fn):
+        """Place F at its original P-F equilibrium radius, along P->F."""
+        self._validate_candidate(candidate)
+        if self.reference_system is None:
+            raise RuntimeError("Missing reference PF6 parameters")
+        p, f = int(self.pf6_atoms[candidate.k_pf6, 0]), int(candidate.leave_F)
+        ref_bonds, _, ref_r0 = self.reference_system["bonds"]
+        matching = np.where(np.any(ref_bonds == p, axis=1) & np.any(ref_bonds == f, axis=1))[0]
+        if len(matching) != 1:
+            raise ValueError("Cannot identify unique original P-F bond")
+        target = float(ref_r0[matching[0]])
+        positions = jnp.asarray(R)
+        direction = disp_fn(positions[f], positions[p])
+        norm = jnp.linalg.norm(direction)
+        # If P and F coincide, reject rather than invent an orientation.
+        if float(norm) < 1.0e-8:
+            raise ValueError("Cannot restore coincident P and F positions")
+        return positions.at[f].set(shift_fn(positions[p], target * direction / norm))
 
     def find_candidates(
         self,
@@ -242,6 +339,11 @@ class LiPF6Reaction:
         ``(None, None)``.
         """
         self._validate_candidate(candidate)
+
+        if candidate.direction == "reverse":
+            return self.build_reverse_trial(system, candidate)
+        if candidate.direction != "forward":
+            raise ValueError(f"Unknown reaction direction: {candidate.direction}")
 
         if not self.candidate_types_are_valid(candidate):
             return None, None
@@ -594,7 +696,7 @@ def prepare_probe_geometry(
 
      # Reject probe geometries that would place the departing fluorine
      # unrealistically close to the reacting Li (d_li_probe < min_lif_distance). In that case we keep the
-     # original F position and allow FIRE relaxation to reach the product
+     # original F position and allow Langevin relaxation to reach the product
      # geometry safely.
 
     geometry_is_valid = (
