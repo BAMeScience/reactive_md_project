@@ -167,10 +167,10 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
 
     relax_calls = []
 
-    def fake_fire_relax_with_nlist(
-        R0,
+    def fake_langevin_relax_with_nlist(
+        key, R0, velocities,
         *,
-        ff_trial,
+        ff,
         shift_fn,
         **kwargs,
     ):
@@ -179,11 +179,11 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
         relax_calls.append(
             {
                 "R0": np.asarray(R0),
-                "ff_trial": ff_trial,
+                "ff_trial": ff,
             }
         )
 
-        return R0, {"final": True}
+        return key, R0, velocities, {"final": True}
 
     monkeypatch.setattr(
         reaction_module,
@@ -192,8 +192,8 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
     )
     monkeypatch.setattr(
         reaction_module,
-        "fire_relax_with_nlist",
-        fake_fire_relax_with_nlist,
+        "langevin_relax_with_nlist",
+        fake_langevin_relax_with_nlist,
     )
 
     (
@@ -249,7 +249,7 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
     # The complete batch must be relaxed exactly once.
     assert len(relax_calls) == 1
 
-    # Both probe displacements must already be present when FIRE starts.
+    # Both probe displacements must already be present when Langevin starts.
     R_before_relaxation = relax_calls[0]["R0"]
 
     np.testing.assert_allclose(

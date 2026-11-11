@@ -30,6 +30,7 @@ def run_md_nvt_with_reactions(
     ff: FFBundle, sys: SystemState, reaction_step_fn,
     box=None, atom_ids=None, atom_types=None, dump_file=None,
     dump_writer=None, event_file=None, candidate_file=None,
+    passes_velocities=False,
 ):
     """Maintain the legacy LiPF6 public signature and return type."""
     observer = LiPF6OutputObserver(
@@ -41,7 +42,7 @@ def run_md_nvt_with_reactions(
     result = run_md_nvt(
         key, cfg=cfg, init_positions=init_positions, masses=masses,
         shift_fn=shift_fn, ff=ff, sys=sys, box=box,
-        reaction_handler=LiPF6Handler(reaction_step_fn),
+        reaction_handler=LiPF6Handler(reaction_step_fn, passes_velocities=passes_velocities),
         observers=(observer,),
     )
     print('Done.')

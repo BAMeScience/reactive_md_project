@@ -38,7 +38,7 @@ The package supports:
 The current implementation includes a LiPF6 decomposition example:
 
 ```text
-LiPF6 -> LiF + PF5
+LiPF6 <-> LiF + PF5
 ```
 
 The LiPF6 reaction is controlled by a single reaction coordinate
@@ -47,7 +47,7 @@ The LiPF6 reaction is controlled by a single reaction coordinate
 sigma = d(P-F) - d(Li-F)
 ```
 
-where the selected F atom is the leaving fluorine. Negative sigma values are reactant-like, while positive sigma values are product-like. The reaction code no longer uses independent hard Li-F or P-F distance gates to decide reactivity; the individual distances are used only to compute sigma and for diagnostic logging.
+where the selected F atom is the leaving fluorine. Negative sigma values are reactant-like, while positive sigma values are product-like. Forward candidates are ranked by sigma. Reverse candidates are restricted to the *recorded* leaving F and Li, with finite P-F and Li-F proximity cutoffs; LiF has no explicit Li-F bond. Reverse reactions are **off by default** in both modes.
 
 ---
 
@@ -211,7 +211,7 @@ reactive-md \
 
 Topology changes are proposed using the reaction coordinate σ and accepted according to a hybrid kinetic/thermodynamic Metropolis scheme.
 
-The reaction coordinate σ is first evaluated to determine whether a reaction trial should be attempted. Only if this kinetic condition is satisfied is the expensive trial topology generated, FIRE-relaxed, and evaluated with the selected energy model (classical force field or MACE). The final thermodynamic acceptance is then determined using the Metropolis criterion based on the energy difference ΔE. Trial reactions yielding non-finite energy differences are automatically rejected.
+The reaction coordinate σ is first evaluated to determine whether a reaction trial should be attempted. Only if this kinetic condition is satisfied is the expensive trial topology generated, Langevin-relaxed, and evaluated with the selected energy model (classical force field or MACE). The final thermodynamic acceptance is then determined using the Metropolis criterion based on the energy difference ΔE. Trial reactions yielding non-finite energy differences are automatically rejected.
 
 ```bash
 reactive-md \
@@ -247,7 +247,7 @@ k_eff = k_base * f(sigma)
 and the reaction probability during one reactive interval is
 
 ```text
-p = 1 - exp(-k_eff * dt)
+p = f(sigma) * k_base * dt  (linear approximation, with k_base * dt <= 1)
 ```
 
 where:
@@ -255,6 +255,24 @@ where:
 - `k_base` is the prescribed or activation-energy-derived base rate in ps^-1.
 - `f(sigma)` is the sigma-dependent geometric factor.
 - `dt` is the reactive check interval.
+
+The exact constant-rate Poisson probability would be `1-exp(-k_eff*dt)`;
+this implementation intentionally uses its first-order approximation. The
+rate implementation uses two independent Bernoulli gates (`f(sigma)` and
+`k_base*dt`), whose joint probability is the expression above. The optional
+reverse rate uses `f(-sigma) * k_reverse * dt` and defaults to zero.
+
+To enable reverse rate attempts, pass `--reverse-rate-ps VALUE`. A nonzero
+reverse rate requires a justified parameter; it is not inferred from the
+forward activation barrier. In Metropolis mode, pass `--allow-reverse-mc` to
+allow exploratory reverse proposals. The hybrid sigma-gated Metropolis
+algorithm is **not** an MH-corrected equilibrium sampler.
+
+All accepted LiPF6 events use the shared post-reaction Langevin relaxation
+(defaults: `--relaxation-dt-ps 0.00025`, `--relaxation-time-ps 5.0`,
+`--relaxation-tau-ps 0.01`). The resulting velocities are passed back to the
+NVT driver, and its thermostat is reinitialized. These parameters should be
+validated for LiPF6 before production runs.
 
 ## 3. Activation-Energy Mode
 
@@ -292,7 +310,7 @@ reactive-md \
   --use-mace-mc
 ```
 
-The molecular dynamics trajectory still uses the classical force field. MACE is used only for the Metropolis reaction acceptance energy evaluation. The FIRE relaxation after the topology proposal currently uses the product-side classical force field.
+The molecular dynamics trajectory still uses the classical force field. MACE is used only for the Metropolis reaction acceptance energy evaluation. The post-proposal Langevin relaxation uses the product-side classical force field; its relaxed velocities are returned to the NVT driver.
 
 ---
 

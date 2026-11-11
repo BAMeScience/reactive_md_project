@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import jax
 import jax.numpy as jnp
-from jax_md.minimize import fire_descent
+from .relaxation import langevin_relax_with_nlist
 
 from .reactions import lipf6
 from .topology_opls import remove_terms_in_molid
@@ -73,6 +73,8 @@ class SystemState:
     epsilons: Any
     molecule_id: Any
     pf6_reacted: Any
+    pf6_leave_f: Any = None
+    pf6_li_partner: Any = None
 
 def reaction_probability(
     sigma: float,
@@ -123,7 +125,9 @@ def rate_probability_from_reaction_coordinate(
         width=width,
     )
     k_eff_ps = float(base_rate_ps) * sigma_factor
-    p_react = 1.0 - float(np.exp(-k_eff_ps * float(reactive_interval_ps)))
+    p_react = k_eff_ps * float(reactive_interval_ps)
+    if not 0.0 <= p_react <= 1.0:
+        raise ValueError("Linear reaction probability must lie in [0, 1]")
     return p_react, k_eff_ps, sigma_factor
 
 
@@ -147,6 +151,7 @@ def candidate_records_from_reaction_candidates(
                 "d_lif": cand.d_lif,
                 "d_pf": cand.d_pf,
                 "sigma": sigma,
+                "direction": cand.direction,
             }
         )
     return records
@@ -161,6 +166,7 @@ def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
         "sigma": sigma,
+        "direction": cand.direction,
     }
 
 
@@ -168,6 +174,8 @@ def _candidate_info(cand: lipf6.ReactionCandidate) -> dict:
 def make_system_state_from_trial(
     trial: dict,
     pf6_reacted_np: np.ndarray,
+    pf6_leave_f=None,
+    pf6_li_partner=None,
 ) -> SystemState:
     return SystemState(
         bonds=(
@@ -197,6 +205,8 @@ def make_system_state_from_trial(
         epsilons=jnp.array(trial["epsilons"]),
         molecule_id=jnp.array(trial["molecule_id"], dtype=int),
         pf6_reacted=jnp.array(pf6_reacted_np),
+        pf6_leave_f=None if pf6_leave_f is None else jnp.array(pf6_leave_f),
+        pf6_li_partner=None if pf6_li_partner is None else jnp.array(pf6_li_partner),
     )
 
 
@@ -249,6 +259,14 @@ def maybe_react_one_event(
     sigma_width: float = 0.2,
     mc_energy_evaluator=None,
     candidate_log_top_n: int = 10,
+    velocities=None,
+    masses=None,
+    temperature_k: float = 400.0,
+    kb_real: float = 0.0019872041,
+    relaxation_dt_ps: float = 0.00025,
+    relaxation_time_ps: float = 5.0,
+    relaxation_tau_ps: float = 0.01,
+    allow_reverse: bool = False,
 ):
 
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
@@ -259,6 +277,21 @@ def maybe_react_one_event(
         pf6_reacted=pf6_reacted_np,
     )
     
+    if sys.pf6_li_partner is not None:
+        occupied = set(int(x) for x in np.asarray(sys.pf6_li_partner)[pf6_reacted_np] if x >= 0)
+        candidates = [c for c in candidates if c.li_idx not in occupied]
+    if allow_reverse and sys.pf6_leave_f is not None and sys.pf6_li_partner is not None:
+        reverse = reaction.find_reverse_candidates(
+            R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
+            pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
+        )
+        # Choose one direction uniformly when both are available. This is
+        # an exploratory Metropolis proposal, not an MH-corrected sampler.
+        if reverse and candidates:
+            key, sub = jax.random.split(key)
+            candidates = reverse if bool(jax.random.bernoulli(sub)) else candidates
+        elif reverse:
+            candidates = reverse
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
         top_n=candidate_log_top_n,
@@ -280,13 +313,14 @@ def maybe_react_one_event(
         "d_lif": cand.d_lif,
         "d_pf": cand.d_pf,
         "sigma": lipf6.reaction_coordinate(d_pf=cand.d_pf, d_lif=cand.d_lif),
+        "direction": cand.direction,
     }
 
     sigma = candidate_info["sigma"]
 
-    # Kinetic sigma gate BEFORE expensive topology/FIRE/energy work.
+    # Kinetic sigma gate BEFORE expensive topology/Langevin/energy work.
     p_sigma = reaction_probability(
-        sigma,
+        sigma if cand.direction == "forward" else -sigma,
         midpoint=sigma_mid,
         width=sigma_width,
     )
@@ -331,14 +365,17 @@ def maybe_react_one_event(
 
     ff_trial = build_trial_forcefield(R, box, trial, ff)
 
-    R_probe = reaction.prepare_probe(
-        R,
-        cand,
-        sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
-        sigma_f=float(trial["sigmas"][cand.leave_F]),
-        disp_fn=ff_trial.disp_fn,
-        shift_fn=shift_fn,
-    )
+    if cand.direction == "reverse":
+        R_probe = reaction.prepare_reverse_probe(
+            R, cand, disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+        )
+    else:
+        R_probe = reaction.prepare_probe(
+            R, cand,
+            sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
+            sigma_f=float(trial["sigmas"][cand.leave_F]),
+            disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+        )
 
     d_lif_after_probe = float(
           jnp.linalg.norm(
@@ -349,18 +386,17 @@ def maybe_react_one_event(
           )
     )
 
-    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
-        R_probe,
-        ff_trial=ff_trial,
-        shift_fn=shift_fn,
-        n_steps=30,
-        dt_start=1.0e-3,
-        f_inc=1.01,
-        dt_max=1.0e-2,
-        n_min=2,
+    key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
+        key, R_probe,
+        jnp.zeros_like(R) if velocities is None else velocities,
+        ff=ff_trial, shift_fn=shift_fn,
+        masses=jnp.ones((len(R),)) if masses is None else masses,
+        temperature_k=temperature_k, kb_real=kb_real,
+        dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
+        thermostat_tau_ps=relaxation_tau_ps,
     )
 
-    if not bool(jnp.all(jnp.isfinite(R_relaxed))):
+    if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
         return key, False, ff, sys, {
             "mode": "metropolis",
             "reason": "nonfinite_relaxed_geometry",
@@ -406,11 +442,17 @@ def maybe_react_one_event(
     if not accepted:
         return key, False, ff, sys, info, R
 
-    pf6_reacted_np[cand.k_pf6] = True
-    sys_new = make_system_state_from_trial(trial, pf6_reacted_np)
+    pf6_reacted_np[cand.k_pf6] = cand.direction == "forward"
+    leave_f = np.full(len(pf6_reacted_np), -1, dtype=np.int32) if sys.pf6_leave_f is None else np.asarray(sys.pf6_leave_f).copy()
+    li_partner = np.full(len(pf6_reacted_np), -1, dtype=np.int32) if sys.pf6_li_partner is None else np.asarray(sys.pf6_li_partner).copy()
+    leave_f[cand.k_pf6] = cand.leave_F if cand.direction == "forward" else -1
+    li_partner[cand.k_pf6] = cand.li_idx if cand.direction == "forward" else -1
+    sys_new = make_system_state_from_trial(trial, pf6_reacted_np, leave_f, li_partner)
 
     info["accepted_event"] = candidate_info
-
+    info["_relaxed_velocities"] = v_relaxed
+    info["relaxation_time_ps"] = relaxation_time_ps
+    ff_trial.nlist = nlist_relaxed
     return key, True, ff_trial, sys_new, info, R_relaxed
 
 
@@ -432,6 +474,13 @@ def maybe_react_rate_events(
     candidate_log_top_n: int = 10,
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
+    velocities=None,
+    masses=None,
+    kb_real: float = 0.0019872041,
+    relaxation_dt_ps: float = 0.00025,
+    relaxation_time_ps: float = 5.0,
+    relaxation_tau_ps: float = 0.01,
+    reverse_rate_ps: float = 0.0,
 ):
     """Attempt rate-based reactions.
 
@@ -445,7 +494,8 @@ def maybe_react_rate_events(
     energy.
 
     Accepted, non-conflicting topology changes and probe placements are
-    accumulated, followed by one final FIRE relaxation.
+    accumulated, followed by one final Langevin relaxation. Reverse events
+    are disabled by default unless a nonzero reverse_rate_ps is supplied.
     """
 
     pf6_reacted_np = np.asarray(
@@ -489,10 +539,20 @@ def maybe_react_rate_events(
     # ---------------------------------------------------------
 
     candidates = reaction.find_candidates(
-        R,
-        ff.disp_fn,
-        pf6_reacted=pf6_reacted_np,
+        R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
     )
+    if reverse_rate_ps < 0.0 or not np.isfinite(reverse_rate_ps):
+        raise ValueError("reverse_rate_ps must be finite and nonnegative")
+    reverse_p_rate = float(reverse_rate_ps * reactive_interval_ps)
+    if reverse_p_rate > 1.0:
+        raise ValueError("Reverse linear rate probability exceeds 1")
+    if reverse_rate_ps > 0.0:
+        if sys.pf6_leave_f is None or sys.pf6_li_partner is None:
+            raise ValueError("Reverse rate requires partner state arrays")
+        candidates += reaction.find_reverse_candidates(
+            R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
+            pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
+        )
 
     candidate_records = candidate_records_from_reaction_candidates(
         candidates,
@@ -523,6 +583,9 @@ def maybe_react_rate_events(
     sys_current = sys
 
     used_li: set[int] = set()
+    leave_f = np.full(len(pf6_reacted_np), -1, dtype=np.int32) if sys.pf6_leave_f is None else np.asarray(sys.pf6_leave_f).copy()
+    li_partner = np.full(len(pf6_reacted_np), -1, dtype=np.int32) if sys.pf6_li_partner is None else np.asarray(sys.pf6_li_partner).copy()
+    occupied_li = set(int(x) for x in li_partner[pf6_reacted_np] if x >= 0)
 
     last_p_sigma = 0.0
     last_p_total = 0.0
@@ -535,7 +598,10 @@ def maybe_react_rate_events(
         if len(accepted_events) >= max_reactions_per_check:
             break
 
-        if pf6_reacted_np[cand.k_pf6]:
+        if pf6_reacted_np[cand.k_pf6] != (cand.direction == "reverse"):
+            continue
+
+        if cand.direction == "forward" and cand.li_idx in occupied_li:
             continue
 
         if cand.li_idx in used_li:
@@ -551,12 +617,11 @@ def maybe_react_rate_events(
         )
 
         p_sigma = reaction_probability(
-            sigma,
-            midpoint=sigma_mid,
-            width=sigma_width,
+            sigma if cand.direction == "forward" else -sigma,
+            midpoint=sigma_mid, width=sigma_width,
         )
-
-        p_total = p_sigma * p_rate
+        event_p_rate = p_rate if cand.direction == "forward" else reverse_p_rate
+        p_total = p_sigma * event_p_rate
 
         last_p_sigma = p_sigma
         last_p_total = p_total
@@ -581,7 +646,7 @@ def maybe_react_rate_events(
         key, sub = jax.random.split(key)
         u_rate = float(jax.random.uniform(sub))
 
-        if u_rate >= p_rate:
+        if u_rate >= event_p_rate:
             continue
 
         # -----------------------------------------------------
@@ -604,12 +669,17 @@ def maybe_react_rate_events(
             ff_current,
         )
 
-        pf6_reacted_np[cand.k_pf6] = True
+        pf6_reacted_np[cand.k_pf6] = cand.direction == "forward"
         used_li.add(cand.li_idx)
+        leave_f[cand.k_pf6] = cand.leave_F if cand.direction == "forward" else -1
+        li_partner[cand.k_pf6] = cand.li_idx if cand.direction == "forward" else -1
+        if cand.direction == "reverse":
+            occupied_li.discard(cand.li_idx)
+        else:
+            occupied_li.add(cand.li_idx)
 
         sys_current = make_system_state_from_trial(
-            trial,
-            pf6_reacted_np,
+            trial, pf6_reacted_np, leave_f, li_partner,
         )
 
         ff_current = ff_trial
@@ -623,7 +693,7 @@ def maybe_react_rate_events(
         event_info.update(
             {
                 "p_sigma": p_sigma,
-                "p_rate": p_rate,
+                "p_rate": event_p_rate,
                 "p_total": p_total,
                 "u_sigma": u_sigma,
                 "u_rate": u_rate,
@@ -681,14 +751,15 @@ def maybe_react_rate_events(
     ):
         sigma_p, sigma_f = probe_parameters
 
-        R_probe_single = reaction.prepare_probe(
-            R,
-            cand,
-            sigma_p=sigma_p,
-            sigma_f=sigma_f,
-            disp_fn=ff_current.disp_fn,
-            shift_fn=shift_fn,
-        )
+        if cand.direction == "reverse":
+            R_probe_single = reaction.prepare_reverse_probe(
+                R, cand, disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
+            )
+        else:
+            R_probe_single = reaction.prepare_probe(
+                R, cand, sigma_p=sigma_p, sigma_f=sigma_f,
+                disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
+            )
 
         R_product = R_product.at[cand.leave_F].set(
             R_probe_single[cand.leave_F]
@@ -698,18 +769,17 @@ def maybe_react_rate_events(
     # Single relaxation after all accepted topology changes.
     # ---------------------------------------------------------
 
-    R_relaxed, nlist_relaxed = fire_relax_with_nlist(
-        R_product,
-        ff_trial=ff_current,
-        shift_fn=shift_fn,
-        n_steps=30,
-        dt_start=1.0e-3,
-        f_inc=1.01,
-        dt_max=1.0e-2,
-        n_min=2,
+    key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
+        key, R_product,
+        jnp.zeros_like(R) if velocities is None else velocities,
+        ff=ff_current, shift_fn=shift_fn,
+        masses=jnp.ones((len(R),)) if masses is None else masses,
+        temperature_k=temperature_k, kb_real=kb_real,
+        dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
+        thermostat_tau_ps=relaxation_tau_ps,
     )
 
-    if not bool(jnp.all(jnp.isfinite(R_relaxed))):
+    if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
         return key, False, ff, sys, {
             "mode": "rate",
             "reason": "nonfinite_relaxed_geometry",
@@ -744,52 +814,8 @@ def maybe_react_rate_events(
         "prefactor_ps": prefactor_ps,
         "dt_reactive_ps": reactive_interval_ps,
         "candidate_records": candidate_records,
+        "_relaxed_velocities": v_relaxed,
+        "relaxation_time_ps": relaxation_time_ps,
     }, R_relaxed
 
-
-def fire_relax_with_nlist(
-    R0: jnp.ndarray,
-    *,
-    ff_trial,
-    shift_fn,
-    n_steps: int = 30,
-    dt_start: float = 1.0e-3,
-    f_inc: float = 1.01,
-    dt_max: float = 1.0e-2,
-    n_min: int = 2,
-):
-    def energy_scalar(R, *, nlist):
-        return ff_trial.energy_fn(R, nlist)["total"]
-
-    fire_init, fire_apply = fire_descent(
-        energy_scalar,
-        shift_fn,
-        dt_start=dt_start,
-        f_inc=f_inc,
-        dt_max=dt_max,
-        n_min=n_min,
-    )
-
-    fire_apply = jax.jit(fire_apply)
-    update_nlist = jax.jit(ff_trial.neighbor_fn.update)
-
-    nlist = ff_trial.neighbor_fn.allocate(R0)
-    fire_state = fire_init(R0, nlist=nlist)
-
-    @jax.jit
-    def step_fire_fn(i, carry):
-        st, nl = carry
-        nl = update_nlist(st.position, nl)
-        st = fire_apply(st, nlist=nl)
-        return st, nl
-
-    fire_state, nlist = jax.lax.fori_loop(
-        0,
-        int(n_steps),
-        step_fire_fn,
-        (fire_state, nlist),
-    )
-
-    fire_state.position.block_until_ready()
-    return fire_state.position, nlist
 
