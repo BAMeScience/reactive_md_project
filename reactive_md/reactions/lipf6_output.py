@@ -44,7 +44,7 @@ def _write_event_header(event_file):
         "step,event,event_index,mode,n_candidates,n_accepted_this_check,"
         "p_rate,k_rate_ps,dt_reactive_ps,"
         "pf6_index,li_idx,leave_F,"
-        "d_lif,d_pf,sigma,dE,p_acc,p_sigma,p_metropolis,p_total,reacted_count\n"
+        "d_lif,d_pf,sigma,dE,p_acc,p_sigma,p_metropolis,p_total,reacted_count,direction\n"
     )
     event_file.flush()
 
@@ -69,7 +69,7 @@ def _write_rate_check(
         f"{info.get('k_rate_ps', '')},"
         f"{info.get('dt_reactive_ps', '')},"
         ",,,,,,,,,,,"
-        f"{reacted_count}\n"
+        f"{reacted_count},\n"
     )
     event_file.flush()
 
@@ -112,7 +112,7 @@ def _write_accepted_event(
         f"{info.get('p_sigma', '')},"
         f"{info.get('p_metropolis', '')},"
         f"{info.get('p_total', '')},"
-        f"{reacted_count}\n"
+        f"{reacted_count},{event.get('direction', 'forward')}\n"
     )
     event_file.flush()
 
@@ -298,29 +298,51 @@ class LiPF6OutputObserver:
                     _write_accepted_event(
                         event_file=self.event_file, step=step,
                         event_index=event_index, info=event_info,
-                        reacted_count=self.pre_reacted_count + batch_index,
+                        reacted_count=reacted_count,
                     )
+            
             else:
                 event = events[0]
-                d_lif, d_pf = event.get('d_lif'), event.get('d_pf')
+                d_lif = event.get('d_lif')
+                d_pf = event.get('d_pf')
                 sigma = event.get('sigma')
+
                 if sigma is None and d_lif is not None and d_pf is not None:
                     sigma = float(d_pf) - float(d_lif)
-                sigma_text = '' if sigma is None else f', sigma={float(sigma):.3f}'
+
+                def fmt(value, digits=3):
+                    return 'N/A' if value is None else f'{float(value):.{digits}f}'
+
+                dE = event.get('dE', info.get('dE'))
+                p_sigma = event.get('p_sigma', info.get('p_sigma'))
+                p_metropolis = event.get(
+                    'p_metropolis', info.get('p_metropolis')
+                )
+                p_total = event.get(
+                    'p_total', info.get('p_total', info.get('p_acc'))
+                )
+
                 print(
                     f'[step {step}] TOPOLOGY CHANGE accepted '
                     f'event #{self.accepted_events}: '
+                    f"direction={event.get('direction', 'unknown')}, "
                     f"pf6={event.get('k_pf6')}, Li={event.get('li_idx')}, "
-                    f"F={event.get('leave_F')}, d_LiF={float(d_lif):.3f}, "
-                    f'd_PF={float(d_pf):.3f}{sigma_text}, '
-                    f"dE={float(info.get('dE')):.4f}, "
-                    f"p_sigma={float(info.get('p_sigma')):.3f}, "
-                    f"pM={float(info.get('p_metropolis')):.3f}, "
-                    f"p={float(info.get('p_total', info.get('p_acc'))):.3f}"
+                    f"F={event.get('leave_F')}, "
+                    f"d_LiF={fmt(d_lif)}, "
+                    f"d_PF={fmt(d_pf)}, "
+                    f"sigma={fmt(sigma)}, "
+                    f"dE={fmt(dE, 4)}, "
+                    f"p_sigma={fmt(p_sigma)}, "
+                    f"pM={fmt(p_metropolis)}, "
+                    f"p={fmt(p_total)}",
+                    flush=True,
                 )
+
                 _write_accepted_event(
-                    event_file=self.event_file, step=step,
-                    event_index=self.accepted_events, info=info,
+                    event_file=self.event_file,
+                    step=step,
+                    event_index=self.accepted_events,
+                    info=info,
                     reacted_count=reacted_count,
                 )
 

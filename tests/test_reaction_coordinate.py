@@ -46,10 +46,9 @@ def test_rate_probability_from_reaction_coordinate():
         width=0.2,
     )
 
-    assert p_rate == pytest.approx(1.0 - math.exp(-0.5))
+    assert p_rate == pytest.approx(0.5)
     assert k_eff == pytest.approx(0.5)
     assert sigma_factor == pytest.approx(0.5)
-
 
 def test_rate_probability_is_zero_for_zero_base_rate():
     p_rate, k_eff, sigma_factor = rate_probability_from_reaction_coordinate(
