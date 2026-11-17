@@ -25,13 +25,46 @@ from .reactions.lipf6_driver import run_md_nvt_with_reactions
 from .lammps_io import write_lammps_dump_frame
 
 
-def _open_text_output(path: str):
+def _open_text_output(path: str, *, restart: bool = False,
+                      checkpoint_enabled: bool = False):
+    """Open output without erasing data on restart.
+
+    The observer restores saved offsets by seeking and truncating. gzip streams
+    do not support that rollback, so checkpointed runs use plain text outputs.
+    """
     if path.endswith(".gz"):
+        if checkpoint_enabled:
+            raise ValueError(
+                "Checkpoint/restart requires uncompressed output files; "
+                f"remove .gz from {path!r}"
+            )
         return gzip.open(path, "wt")
-    return open(path, "w")
+    if restart:
+        # r+ never truncates; the observer validates and rolls back this file.
+        return open(path, "r+", encoding="utf-8", newline="")
+    return open(path, "w+" if checkpoint_enabled else "w",
+                encoding="utf-8", newline="")
 
 
-def main(cfg: SimConfig, *, reaction_step_factory=None):
+def main(cfg: SimConfig, *, reaction_step_factory=None,
+         checkpoint_path: str | None = None,
+         checkpoint_every_steps: int | None = None,
+         restart_path: str | None = None):
+    """Run LiPF6 MD; cfg.steps is the total target step on restart."""
+    if restart_path is not None and checkpoint_path is None:
+        checkpoint_path = restart_path
+    checkpoint_enabled = checkpoint_path is not None or restart_path is not None
+    if checkpoint_every_steps is not None and checkpoint_path is None:
+        raise ValueError("checkpoint_every_steps requires a checkpoint file")
+    if restart_path is not None and not Path(restart_path).is_file():
+        raise FileNotFoundError(f"Restart checkpoint not found: {restart_path}")
+    if checkpoint_enabled:
+        for output in (cfg.dump_file, cfg.event_log_file, cfg.candidate_log_file):
+            if output is not None and str(output).endswith(".gz"):
+                raise ValueError(
+                    "Checkpoint/restart requires uncompressed outputs; "
+                    f"remove .gz from {output!r}"
+                )
     (
         positions,
         bonds,
@@ -311,13 +344,22 @@ def main(cfg: SimConfig, *, reaction_step_factory=None):
         candidate_file = None
 
         if cfg.dump_file is not None:
-            dump_file = stack.enter_context(_open_text_output(cfg.dump_file))
+            dump_file = stack.enter_context(_open_text_output(
+                cfg.dump_file, restart=restart_path is not None,
+                checkpoint_enabled=checkpoint_enabled,
+            ))
 
         if cfg.event_log_file is not None:
-            event_file = stack.enter_context(_open_text_output(cfg.event_log_file))
+            event_file = stack.enter_context(_open_text_output(
+                cfg.event_log_file, restart=restart_path is not None,
+                checkpoint_enabled=checkpoint_enabled,
+            ))
 
         if cfg.candidate_log_file is not None:
-            candidate_file = stack.enter_context(_open_text_output(cfg.candidate_log_file))
+            candidate_file = stack.enter_context(_open_text_output(
+                cfg.candidate_log_file, restart=restart_path is not None,
+                checkpoint_enabled=checkpoint_enabled,
+            ))
 
         _result = run_md_nvt_with_reactions(
             key,
@@ -336,6 +378,9 @@ def main(cfg: SimConfig, *, reaction_step_factory=None):
             event_file=event_file,
             candidate_file=candidate_file,
             passes_velocities=True,
+            checkpoint_path=checkpoint_path,
+            checkpoint_every_steps=checkpoint_every_steps,
+            restart_path=restart_path,
         )
 
     return _result
@@ -349,8 +394,15 @@ def cli():
     parser.add_argument("--data", required=True, help="LAMMPS data file")
     parser.add_argument("--settings", required=True, help="LAMMPS settings file")
 
-    parser.add_argument("--steps", type=int, default=None)
+    parser.add_argument("--steps", type=int, default=None,
+                        help="Total target MD steps, including steps before a restart")
     parser.add_argument("--check-every", type=int, default=None)
+    parser.add_argument("--checkpoint-file", default=None,
+                        help="Path to save an atomic MD checkpoint")
+    parser.add_argument("--checkpoint-every", type=int, default=None,
+                        help="Save every N MD steps (a multiple of --check-every)")
+    parser.add_argument("--restart-from", default=None,
+                        help="Resume from this checkpoint; outputs must be the original files")
 
     parser.add_argument("--sigma-mid", type=float, default=default_cfg.sigma_mid)
     parser.add_argument("--sigma-width", type=float, default=default_cfg.sigma_width)
@@ -486,7 +538,18 @@ def cli():
         mace_capacity_multiplier=args.mace_capacity_multiplier,
     )
 
-    main(cfg)
+    main(
+        cfg,
+        checkpoint_path=(
+            str(Path(args.checkpoint_file).expanduser().resolve())
+            if args.checkpoint_file is not None else None
+        ),
+        checkpoint_every_steps=args.checkpoint_every,
+        restart_path=(
+            str(Path(args.restart_from).expanduser().resolve())
+            if args.restart_from is not None else None
+        ),
+    )
 
 
 if __name__ == "__main__":

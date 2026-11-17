@@ -47,7 +47,7 @@ class SimConfig:
     li_type: int = 8
 
     # Thermostat / random seed
-    tau_T: float = 100.0
+    tau_T: float = 0.1
     prng_seed: int = 0
 
     # Output

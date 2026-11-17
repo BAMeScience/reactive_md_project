@@ -4,6 +4,8 @@ All chemistry-specific output lives here; the NVT driver only emits snapshots.
 """
 from __future__ import annotations
 
+import os
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -200,8 +202,9 @@ class LiPF6OutputObserver:
 
     def __init__(self, *, cfg, box, masses, atom_ids=None, atom_types=None,
                  dump_file=None, dump_writer=None, event_file=None,
-                 candidate_file=None):
+                 candidate_file=None, resume=False):
         self.cfg = cfg
+        self.resume = bool(resume)
         self.box = box
         self.masses = jnp.asarray(masses)
         self.atom_ids = atom_ids
@@ -218,8 +221,104 @@ class LiPF6OutputObserver:
         self.pre_reacted_count = 0
         self.accepted_events = 0
         self.disp_fn = None
-        _write_event_header(event_file)
-        _write_candidate_header(candidate_file)
+        if self.resume:
+            # A restart must not open an existing output with 'w' or 'x':
+            # those modes destroy it before checkpoint restoration can run.
+            for label, stream in self._output_streams().items():
+                if stream is not None and any(c in getattr(stream, 'mode', '') for c in 'wx'):
+                    raise ValueError(
+                        f'{label} must be opened for append/update, not write/truncate, on restart'
+                    )
+        else:
+            _write_event_header(event_file)
+            _write_candidate_header(candidate_file)
+
+    def _output_streams(self):
+        return {
+            'dump': self.dump_file,
+            'events': self.event_file,
+            'candidates': self.candidate_file,
+        }
+
+    @staticmethod
+    def _stream_identity(stream):
+        name = getattr(stream, 'name', None)
+        return os.path.realpath(os.fspath(name)) if isinstance(name, (str, os.PathLike)) else None
+
+    def checkpoint_state(self):
+        """Capture unwrapping state and exact output boundaries after flushing."""
+        outputs = {}
+        for label, stream in self._output_streams().items():
+            if stream is None:
+                outputs[label] = None
+                continue
+            if stream.closed or not stream.seekable():
+                raise ValueError(f'{label} output must be open and seekable for checkpointing')
+            stream.flush()
+            stream.seek(0, os.SEEK_END)
+            outputs[label] = {
+                'offset': stream.tell(),
+                'path': self._stream_identity(stream),
+            }
+        return {
+            'version': 1,
+            'dump_every': int(self.dump_every),
+            'previous_position': self.previous_position,
+            'unwrapped_position': self.unwrapped_position,
+            'pre_reacted_count': int(self.pre_reacted_count),
+            'accepted_events': int(self.accepted_events),
+            'outputs': outputs,
+        }
+
+    def restore_checkpoint_state(self, saved):
+        """Restore observer and roll output files back to the saved boundary.
+
+        Output files may contain records written after the last checkpoint.
+        Truncating to saved offsets prevents duplicate records on replay.
+        """
+        if not self.resume:
+            raise ValueError('Construct LiPF6OutputObserver(resume=True) for restart')
+        if saved.get('version') != 1:
+            raise ValueError('Unsupported LiPF6 observer checkpoint version')
+        if int(saved['dump_every']) != int(self.dump_every):
+            raise ValueError('dump_every differs from checkpoint')
+        outputs = saved['outputs']
+        streams = self._output_streams()
+        if set(outputs) != set(streams):
+            raise ValueError('Output stream configuration differs from checkpoint')
+
+        # Validate every file before changing any of them.
+        for label, stream in streams.items():
+            record = outputs[label]
+            if (stream is None) != (record is None):
+                raise ValueError(f'{label} output presence differs from checkpoint')
+            if stream is None:
+                continue
+            if stream.closed or not stream.seekable() or not stream.writable():
+                raise ValueError(f'{label} output must be open, writable and seekable')
+            if any(c in getattr(stream, 'mode', '') for c in 'wx'):
+                raise ValueError(f'{label} output must not be opened in truncating mode')
+            if record['path'] != self._stream_identity(stream):
+                raise ValueError(f'{label} output path differs from checkpoint')
+            stream.flush()
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() < int(record['offset']):
+                raise ValueError(f'{label} output is shorter than its checkpoint boundary')
+
+        for label, stream in streams.items():
+            if stream is not None:
+                offset = int(outputs[label]['offset'])
+                stream.seek(offset)
+                stream.truncate(offset)
+                stream.flush()
+
+        self.previous_position = saved['previous_position']
+        self.unwrapped_position = saved['unwrapped_position']
+        self.pre_reacted_count = int(saved['pre_reacted_count'])
+        self.accepted_events = int(saved['accepted_events'])
+        # The driver will supply the restored FF displacement function on the
+        # next on_before_reaction() call, before any unwrapping is performed.
+        self.disp_fn = None
 
     def _unwrap_to(self, positions):
         if self.previous_position is None:
@@ -391,3 +490,4 @@ class LiPF6OutputObserver:
                 f"d_LiF={cand['d_lif']:.3f}, d_PF={cand['d_pf']:.3f}, "
                 f'sigma={float(sigma):.3f}'
             )
+

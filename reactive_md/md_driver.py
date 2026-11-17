@@ -1,7 +1,7 @@
 """Stable chemistry-independent entry point for reactive NVT dynamics.
 
 Core data contracts live in :mod:`reactive_md.engine.contracts`; the
-Nose-Hoover stepper lives in :mod:`reactive_md.engine.nvt`.  The generic
+Nose-Hoover stepper lives in :mod:`reactive_md.engine.nvt`. The generic
 orchestration below deliberately knows nothing about A2 or LiPF6.
 
 Historical chemistry-specific entry points remain available lazily.
@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax
+import numpy as np
 
 from .config import SimConfig
 from .engine import (
@@ -20,6 +21,85 @@ from .engine import (
 
 if TYPE_CHECKING:
     from .forcefield import FFBundle
+
+
+def _observer_checkpoint_state(observers):
+    """Collect state from observers, never including open output handles."""
+    saved = {}
+    for index, observer in enumerate(observers):
+        getter = getattr(observer, 'checkpoint_state', None)
+        if not callable(getter):
+            raise TypeError(
+                f'Observer {index} ({type(observer).__name__}) must implement '
+                'checkpoint_state() for checkpoint/restart'
+            )
+        saved[str(index)] = getter()
+    return saved
+
+
+def _restore_observers(observers, saved):
+    if saved is None:
+        if observers:
+            raise ValueError('Checkpoint has no observer state')
+        return
+    if set(saved) != {str(i) for i in range(len(observers))}:
+        raise ValueError('Checkpoint observer count differs from current run')
+    for index, observer in enumerate(observers):
+        restore = getattr(observer, 'restore_checkpoint_state', None)
+        if not callable(restore):
+            raise TypeError(
+                f'Observer {index} ({type(observer).__name__}) must implement '
+                'restore_checkpoint_state(state) for restart'
+            )
+        restore(saved[str(index)])
+
+
+def _restart_metadata(cfg, box, masses):
+    """Inputs that must remain unchanged across a continuation."""
+    return {
+        'dt': float(cfg.dt),
+        'temperature_k': float(cfg.temperature_k),
+        'kb_real': float(cfg.kb_real),
+        'check_every': int(cfg.check_every),
+        'max_events': int(cfg.max_events),
+        'box': None if box is None else np.asarray(jax.device_get(box)).copy(),
+        'masses': np.asarray(jax.device_get(masses)).copy(),
+    }
+
+
+def _validate_restart_metadata(saved, current):
+    if set(saved) != set(current):
+        raise ValueError('Checkpoint simulation metadata is incompatible')
+    for name, value in current.items():
+        previous = saved[name]
+        if name in ('box', 'masses'):
+            equal = (previous is None and value is None) or (
+                previous is not None and value is not None
+                and np.array_equal(np.asarray(previous), np.asarray(value))
+            )
+        else:
+            equal = previous == value
+        if not equal:
+            raise ValueError(f'Checkpoint does not match current {name}')
+
+
+def _rebuild_forcefield(md_state, system, options, energy_offset, box):
+    """Reconstruct executable functions from saved numerical topology."""
+    from .forcefield import build_forcefield
+
+    return build_forcefield(
+        md_state.position, box,
+        bond_idx=system.bonds[0], k_b=system.bonds[1], r0=system.bonds[2],
+        angle_idx=system.angles[0], k_theta=system.angles[1],
+        theta0=system.angles[2],
+        torsions=system.torsions, impropers=system.impropers,
+        charges=system.charges, sigmas=system.sigmas,
+        epsilons=system.epsilons, molecule_id=system.molecule_id,
+        r_cut=float(options['r_cut']),
+        dr_threshold=float(options['dr_threshold']),
+        use_shift_lj=options['use_shift_lj'],
+        energy_offset=energy_offset,
+    )
 
 
 def run_md_nvt(
@@ -34,21 +114,73 @@ def run_md_nvt(
     reaction_handler: ReactionHandler,
     box=None,
     observers: tuple[MDObserver, ...] = (),
+    checkpoint_path: str | None = None,
+    checkpoint_every_steps: int | None = None,
+    restart_path: str | None = None,
+    energy_offset: float | None = None,
 ) -> MDRunResult:
-    """Generic NVT driver. Adding chemistry does not require editing it.
+    """Generic NVT driver with optional checkpoint/restart.
 
-    Handlers may update positions, velocities, force fields and topology, but
-    must return the original objects when no reaction is accepted. Observer
-    callbacks receive post-check snapshots; step zero is included.
+    ``cfg.steps`` is the TOTAL desired step count, including completed steps.
+    Checkpoints occur only after a complete reaction-check/observer cycle.
+    For continuous reaction timing, the checkpoint interval must be a multiple
+    of ``cfg.check_every``. Observer classes must implement checkpoint_state()
+    and restore_checkpoint_state(state) when checkpointing is enabled.
+
+    The caller must construct the reaction handler (including its unreacted
+    reference topology) from the original input before invoking this driver.
     """
     if cfg.steps < 0 or cfg.max_events < 0:
         raise ValueError('steps and max_events must be nonnegative')
-    stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
-    key, sub = jax.random.split(key)
-    state = stepper.initialize(sub, init_positions)
+    if int(cfg.check_every) <= 0:
+        raise ValueError('check_every must be positive')
+    if checkpoint_every_steps is not None:
+        if checkpoint_path is None:
+            raise ValueError('checkpoint_every_steps requires checkpoint_path')
+        if (checkpoint_every_steps <= 0
+                or checkpoint_every_steps % int(cfg.check_every) != 0):
+            raise ValueError('checkpoint_every_steps must be a positive multiple of check_every')
+
+    if (checkpoint_path is not None or restart_path is not None) and observers:
+        for index, observer in enumerate(observers):
+            if not callable(getattr(observer, 'checkpoint_state', None)) or not callable(
+                getattr(observer, 'restore_checkpoint_state', None)
+            ):
+                raise TypeError(
+                    f'Observer {index} ({type(observer).__name__}) needs both '
+                    'checkpoint_state() and restore_checkpoint_state(state)'
+                )
+
+    metadata = _restart_metadata(cfg, box, masses)
     accepted_events = 0
     steps_done = 0
     relaxation_elapsed = 0.0
+    active_energy_offset = energy_offset
+
+    if restart_path is not None:
+        from .checkpoint import load_checkpoint
+
+        saved = load_checkpoint(restart_path)
+        _validate_restart_metadata(saved['metadata'], metadata)
+        steps_done = int(saved['steps_done'])
+        if steps_done > int(cfg.steps):
+            raise ValueError('Checkpoint is beyond requested total cfg.steps')
+        accepted_events = int(saved['accepted_events'])
+        relaxation_elapsed = float(saved['relaxation_elapsed_ps'])
+        key = saved['key']
+        state = saved['md_state']
+        sys = type(sys)(**saved['system_state'])
+        active_energy_offset = saved['energy_offset']
+        ff = _rebuild_forcefield(
+            state, sys, saved['forcefield_options'], active_energy_offset, box
+        )
+        # Do not call initialize(): that would reset Nose-Hoover variables.
+        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
+        _restore_observers(observers, saved['observer_state'])
+    else:
+        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
+        key, sub = jax.random.split(key)
+        state = stepper.initialize(sub, init_positions)
 
     def notify(outcome=None, pre_positions=None):
         observation = MDObservation(
@@ -64,7 +196,33 @@ def run_md_nvt(
         for observer in observers:
             observer.on_observation(observation)
 
-    notify()
+    def save_now():
+        if checkpoint_path is None:
+            return
+        from .checkpoint import save_checkpoint
+
+        options = ff.nb_options
+        save_checkpoint(
+            checkpoint_path,
+            md_state=state,
+            system_state=sys,
+            key=key,
+            steps_done=steps_done,
+            accepted_events=accepted_events,
+            relaxation_elapsed_ps=relaxation_elapsed,
+            observer_state=_observer_checkpoint_state(observers),
+            forcefield_options={
+                'r_cut': float(options.r_cut),
+                'dr_threshold': float(options.dr_threshold),
+                'use_shift_lj': getattr(options, 'use_shift_lj', None),
+            },
+            energy_offset=active_energy_offset,
+            metadata=metadata,
+        )
+
+    if restart_path is None:
+        notify()
+    # On restart, the saved step has already been emitted. Do not duplicate it.
     while steps_done < cfg.steps and accepted_events < cfg.max_events:
         chunk = min(int(cfg.check_every), int(cfg.steps - steps_done))
         state, ff.nlist = stepper.advance(state, ff.nlist, chunk=chunk)
@@ -106,6 +264,8 @@ def run_md_nvt(
         if outcome.events:
             accepted_events += len(outcome.events)
             ff, sys = outcome.ff, outcome.system
+            # The current reaction trial builder does not propagate offsets.
+            active_energy_offset = None
             if outcome.reinitialize_thermostat:
                 key, sub = jax.random.split(key)
             else:
@@ -113,6 +273,12 @@ def run_md_nvt(
             state, ff.nlist = stepper.synchronize(state, outcome, key=sub)
             relaxation_elapsed += float(outcome.relaxation_time_ps)
         notify(outcome, before)
+        if (checkpoint_every_steps is not None
+                and steps_done % checkpoint_every_steps == 0):
+            save_now()
+
+    # Also persist the final complete boundary (including early max_events stop).
+    save_now()
     return MDRunResult(
         state, ff, sys, accepted_events, steps_done, key, relaxation_elapsed
     )
@@ -128,3 +294,4 @@ def __getattr__(name):
         from .reactions import a2_driver
         return getattr(a2_driver, name)
     raise AttributeError(name)
+

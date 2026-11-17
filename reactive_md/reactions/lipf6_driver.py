@@ -31,19 +31,29 @@ def run_md_nvt_with_reactions(
     box=None, atom_ids=None, atom_types=None, dump_file=None,
     dump_writer=None, event_file=None, candidate_file=None,
     passes_velocities=False,
+    checkpoint_path: str | None = None,
+    checkpoint_every_steps: int | None = None,
+    restart_path: str | None = None,
 ):
-    """Maintain the legacy LiPF6 public signature and return type."""
+    """Maintain the legacy LiPF6 public signature and return type.
+
+    Checkpoint/restart arguments are passed to the generic MD driver.
+    """
     observer = LiPF6OutputObserver(
         cfg=cfg, box=box, masses=masses,
         atom_ids=atom_ids, atom_types=atom_types,
         dump_file=dump_file, dump_writer=dump_writer,
         event_file=event_file, candidate_file=candidate_file,
+        resume=restart_path is not None,
     )
     result = run_md_nvt(
         key, cfg=cfg, init_positions=init_positions, masses=masses,
         shift_fn=shift_fn, ff=ff, sys=sys, box=box,
         reaction_handler=LiPF6Handler(reaction_step_fn, passes_velocities=passes_velocities),
         observers=(observer,),
+        checkpoint_path=checkpoint_path,
+        checkpoint_every_steps=checkpoint_every_steps,
+        restart_path=restart_path,
     )
     print('Done.')
     print(f'Total accepted events: {result.accepted_events}')
@@ -53,3 +63,4 @@ def run_md_nvt_with_reactions(
         ff=result.ff, sys=result.sys,
         accepted_events=result.accepted_events,
     )
+
