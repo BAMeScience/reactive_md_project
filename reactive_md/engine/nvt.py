@@ -14,6 +14,7 @@ import numpy as np
 
 from ..config import SimConfig
 from .contracts import ReactionOutcome
+from ..md_units import md_unit_factors
 
 if TYPE_CHECKING:
     from ..forcefield import FFBundle
@@ -47,11 +48,12 @@ class NVTStepper:
         cfg = self.cfg
         from jax_md import simulate
 
+        _, kb_md = md_unit_factors(cfg.md_unit_system),
         self.init_nvt, apply_nvt = simulate.nvt_nose_hoover(
             self.energy_scalar,
             self.shift_fn,
             dt=cfg.dt,
-            kT=cfg.kb_real * cfg.temperature_k,
+            kT=kb_md * cfg.temperature_k,
             tau=cfg.tau_T,
         )
         neighbor_fn = ff.neighbor_fn

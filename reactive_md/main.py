@@ -23,6 +23,7 @@ from .reaction import (
 )
 from .reactions.lipf6_driver import run_md_nvt_with_reactions
 from .lammps_io import write_lammps_dump_frame
+from .md_units import md_unit_factors
 
 
 def _open_text_output(path: str, *, restart: bool = False,
@@ -81,7 +82,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
     charges, sigmas, epsilons, pair_indices, is_14_mask = nonbonded
 
     positions = np.asarray(positions)
-    masses = np.asarray(masses)
+    mass_factor, _ = md_unit_factors(cfg.md_unit_system)
+    masses = np.asarray(masses) * mass_factor
     atom_types = np.asarray(atom_types, dtype=np.int32)
     molecule_id = np.asarray(molecule_id, dtype=np.int32)
     box = np.asarray(box)
@@ -445,6 +447,8 @@ def cli():
 
     parser.add_argument("--temperature", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--md-unit-system", choices=("real", "metal"),default="real", help="Unit system for the MD force field (default: real).",)
+    parser.add_argument("--tau-T", type=float, default=0.1, help="Nose-Hoover thermostat coupling time in ps (default: 0.1).",)
 
     parser.add_argument(
         "--dump-file",
@@ -514,6 +518,8 @@ def cli():
         relaxation_tau_ps=args.relaxation_tau_ps,
         temperature_k=args.temperature if args.temperature is not None else default_cfg.temperature_k,
         prng_seed=args.seed if args.seed is not None else default_cfg.prng_seed,
+        md_unit_system=args.md_unit_system,
+        tau_T=args.tau_T,
         dump_file=(
             str(Path(args.dump_file).expanduser().resolve())
             if args.dump_file is not None

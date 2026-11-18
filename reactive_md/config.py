@@ -37,18 +37,18 @@ class SimConfig:
     # Thermodynamic / force-field settings
     temperature_k: float = 400.0
     kb_real: float = 0.0019872041
-
-    r_cut: float = 15.0
+    md_unit_system: str = "real"
+    r_cut: float = 15.0 
     dr_threshold: float = 0.5
+
+    # Thermostat / random seed
+    tau_T: float = 0.1
+    prng_seed: int = 0
 
     # Atom types
     p_type: int = 6
     f_type: int = 7
     li_type: int = 8
-
-    # Thermostat / random seed
-    tau_T: float = 0.1
-    prng_seed: int = 0
 
     # Output
     dump_file: str | None = None

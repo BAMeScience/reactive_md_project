@@ -18,6 +18,8 @@ from .engine import (
     ReactionContext, ReactionOutcome, ReactionHandler,
     MDObservation, MDObserver, MDRunResult, NVTStepper,
 )
+from .md_units import md_unit_factors
+
 
 if TYPE_CHECKING:
     from .forcefield import FFBundle
@@ -246,6 +248,8 @@ def run_md_nvt(
             before_callback = getattr(observer, 'on_before_reaction', None)
             if before_callback is not None:
                 before_callback(before_observation)
+
+        _, kb_md = md_unit_factors(cfg.md_unit_system),        
         outcome = reaction_handler.attempt(ReactionContext(
             key=key,
             step=steps_done,
@@ -258,7 +262,7 @@ def run_md_nvt(
             shift_fn=shift_fn,
             masses=stepper.mass,
             temperature_k=cfg.temperature_k,
-            kb_real=cfg.kb_real,
+            kb_real=kb_md,
         ))
         key = outcome.key
         if outcome.events:
