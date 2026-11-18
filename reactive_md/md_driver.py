@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import jax
+import jax.numpy as jnp
 import numpy as np
 
 from .config import SimConfig
@@ -56,10 +57,13 @@ def _restore_observers(observers, saved):
         restore(saved[str(index)])
 
 
-def _restart_metadata(cfg, box, masses):
+def _restart_metadata(cfg, box, masses, float_dtype):
     """Inputs that must remain unchanged across a continuation."""
     return {
         'dt': float(cfg.dt),
+        'md_unit_system': str(cfg.md_unit_system),
+        'tau_T': float(cfg.tau_T),
+        'float_dtype': np.dtype(float_dtype).name,
         'temperature_k': float(cfg.temperature_k),
         'kb_real': float(cfg.kb_real),
         'check_every': int(cfg.check_every),
@@ -153,7 +157,16 @@ def run_md_nvt(
                     'checkpoint_state() and restore_checkpoint_state(state)'
                 )
 
-    metadata = _restart_metadata(cfg, box, masses)
+    # Select a single floating-point dtype for the MD inputs. This must be
+    # configured before the caller constructs the force field and shift_fn;
+    # casting here cannot retroactively change their captured parameters.
+    float_dtype = jnp.float64 if jax.config.jax_enable_x64 else jnp.float32
+    init_positions = jnp.asarray(init_positions, dtype=float_dtype)
+    masses = jnp.asarray(masses, dtype=float_dtype)
+    if box is not None:
+        box = jnp.asarray(box, dtype=float_dtype)
+
+    metadata = _restart_metadata(cfg, box, masses, float_dtype)
     accepted_events = 0
     steps_done = 0
     relaxation_elapsed = 0.0
@@ -171,6 +184,13 @@ def run_md_nvt(
         relaxation_elapsed = float(saved['relaxation_elapsed_ps'])
         key = saved['key']
         state = saved['md_state']
+        # Never silently cast a restored thermostat/MD state: doing so would
+        # invalidate a strict continuation and could change the trajectory.
+        if np.dtype(state.position.dtype) != np.dtype(float_dtype):
+            raise ValueError(
+                f'Checkpoint position dtype {state.position.dtype} does not '
+                f'match requested {np.dtype(float_dtype).name}'
+            )
         sys = type(sys)(**saved['system_state'])
         active_energy_offset = saved['energy_offset']
         ff = _rebuild_forcefield(
@@ -249,7 +269,7 @@ def run_md_nvt(
             if before_callback is not None:
                 before_callback(before_observation)
 
-        _, kb_md = md_unit_factors(cfg.md_unit_system),        
+        _, kb_md = md_unit_factors(cfg.md_unit_system)        
         outcome = reaction_handler.attempt(ReactionContext(
             key=key,
             step=steps_done,
@@ -298,4 +318,5 @@ def __getattr__(name):
         from .reactions import a2_driver
         return getattr(a2_driver, name)
     raise AttributeError(name)
+
 

@@ -81,12 +81,13 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
 
     charges, sigmas, epsilons, pair_indices, is_14_mask = nonbonded
 
-    positions = np.asarray(positions)
+    float_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
+    positions = np.asarray(positions, dtype=float_dtype)
     mass_factor, _ = md_unit_factors(cfg.md_unit_system)
-    masses = np.asarray(masses) * mass_factor
+    masses = np.asarray(masses, dtype=float_dtype) * mass_factor
     atom_types = np.asarray(atom_types, dtype=np.int32)
     molecule_id = np.asarray(molecule_id, dtype=np.int32)
-    box = np.asarray(box)
+    box = np.asarray(box, dtype=float_dtype)
 
     atom_ids = np.arange(1, positions.shape[0] + 1, dtype=np.int32)
 
@@ -153,26 +154,26 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
         R=jnp.array(positions),
         box=box,
         bond_idx=np.array(bonds[0], dtype=np.int32),
-        k_b=np.array(bonds[1], dtype=np.float32),
-        r0=np.array(bonds[2], dtype=np.float32),
+        k_b=np.array(bonds[1], dtype=float_dtype),
+        r0=np.array(bonds[2], dtype=float_dtype),
         angle_idx=np.array(angles[0], dtype=np.int32),
-        k_theta=np.array(angles[1], dtype=np.float32),
-        theta0=np.array(angles[2], dtype=np.float32),
+        k_theta=np.array(angles[1], dtype=float_dtype),
+        theta0=np.array(angles[2], dtype=float_dtype),
         torsions=(
             np.array(torsions[0], dtype=np.int32),
-            np.array(torsions[1], dtype=np.float32),
+            np.array(torsions[1], dtype=float_dtype),
             np.array(torsions[2], dtype=np.int32),
-            np.array(torsions[3], dtype=np.float32),
+            np.array(torsions[3], dtype=float_dtype),
         ),
         impropers=(
             np.array(impropers[0], dtype=np.int32),
-            np.array(impropers[1], dtype=np.float32),
+            np.array(impropers[1], dtype=float_dtype),
             np.array(impropers[2], dtype=np.int32),
-            np.array(impropers[3], dtype=np.float32),
+            np.array(impropers[3], dtype=float_dtype),
         ),
-        charges=np.array(charges, dtype=np.float32),
-        sigmas=np.array(sigmas, dtype=np.float32),
-        epsilons=np.array(epsilons, dtype=np.float32),
+        charges=np.array(charges, dtype=float_dtype),
+        sigmas=np.array(sigmas, dtype=float_dtype),
+        epsilons=np.array(epsilons, dtype=float_dtype),
         molecule_id=molecule_id,
         r_cut=cfg.r_cut,
         dr_threshold=cfg.dr_threshold,
