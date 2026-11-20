@@ -326,7 +326,7 @@ def maybe_react_one_event(
     )
 
     key, sub = jax.random.split(key)
-    u_sigma = float(jax.random.uniform(sub))
+    u_sigma = float(jax.random.uniform(sub,dtype=jnp.float32))
 
     if u_sigma >= p_sigma:
        return key, False, ff, sys, {
@@ -631,7 +631,7 @@ def maybe_react_rate_events(
         # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u_sigma = float(jax.random.uniform(sub))
+        u_sigma = float(jax.random.uniform(sub,dtype=jnp.float32))
 
         if u_sigma >= p_sigma:
             continue
@@ -644,7 +644,7 @@ def maybe_react_rate_events(
         # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u_rate = float(jax.random.uniform(sub))
+        u_rate = float(jax.random.uniform(sub,dtype=jnp.float32))
 
         if u_rate >= event_p_rate:
             continue
