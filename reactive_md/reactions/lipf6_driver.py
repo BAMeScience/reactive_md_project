@@ -47,17 +47,19 @@ def run_md_nvt_with_reactions(
         dump_file=dump_file, dump_writer=dump_writer,
         event_file=event_file, candidate_file=candidate_file,
         resume=restart_path is not None,
+        md_energy_fn=md_energy_fn,
+        md_neighbor_fn=md_neighbor_fn,
     )
     result = run_md_nvt(
         key, cfg=cfg, init_positions=init_positions, masses=masses,
         shift_fn=shift_fn, ff=ff, sys=sys, box=box,
         reaction_handler=LiPF6Handler(reaction_step_fn, passes_velocities=passes_velocities),
-        observers=() if md_energy_fn is not None else (observer,),
-        checkpoint_path=checkpoint_path,
-        checkpoint_every_steps=checkpoint_every_steps,
-        restart_path=restart_path,
-        md_energy_fn=md_energy_fn,
-        md_neighbor_fn=md_neighbor_fn,
+        observers=(observer,),
+        **({"checkpoint_path": checkpoint_path} if checkpoint_path is not None else {}),
+        **({"checkpoint_every_steps": checkpoint_every_steps} if checkpoint_every_steps is not None else {}),
+        **({"restart_path": restart_path} if restart_path is not None else {}),
+        **({"md_energy_fn": md_energy_fn} if md_energy_fn is not None else {}),
+        **({"md_neighbor_fn": md_neighbor_fn} if md_neighbor_fn is not None else {}),
     )
     print('Done.')
     print(f'Total accepted events: {result.accepted_events}')

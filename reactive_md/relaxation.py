@@ -74,9 +74,20 @@ def langevin_relax_with_nlist(
             "relaxation_time_ps must be an integer multiple of dt_ps."
         )
 
-    mass = jnp.asarray(masses)
-    kT = float(kb_real) * float(temperature_k)
-    gamma = 1.0 / thermostat_tau_ps
+    # Keep all Langevin state and integrator parameters in the
+    # same precision as the incoming coordinates.
+    R = jnp.asarray(R)
+    dtype = R.dtype
+    mass = jnp.asarray(masses, dtype=dtype)
+    velocities = jnp.asarray(velocities, dtype=dtype)
+
+    dt = jnp.asarray(dt_ps, dtype=dtype)
+    kT = jnp.asarray(
+        float(kb_real) * float(temperature_k), dtype=dtype
+    )
+    gamma = jnp.asarray(
+        1.0 / thermostat_tau_ps, dtype=dtype
+    )
 
     def energy_scalar(positions, neighbor):
         if md_energy_fn is not None:
@@ -86,7 +97,7 @@ def langevin_relax_with_nlist(
     init_fn, apply_fn = simulate.nvt_langevin(
         energy_scalar,
         shift_fn,
-        dt=dt_ps,
+        dt=dt,
         kT=kT,
         gamma=gamma,
     )
@@ -114,7 +125,7 @@ def langevin_relax_with_nlist(
     state = init_fn(sub, R, mass=mass, neighbor=nlist)
     state = replace(
         state,
-        momentum=jnp.asarray(velocities) * mass[:, None],
+        momentum=velocities * mass[:, None],
     )
 
     @partial(jax.jit, static_argnames=("chunk",))

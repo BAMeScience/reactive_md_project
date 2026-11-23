@@ -116,7 +116,7 @@ class NVTStepper:
         nlist = self.allocate_valid_nlist(positions)
         self.nlist = nlist
 
-        if self.md_energy_fn is None:
+        if getattr(self, 'md_energy_fn', None) is None:
             self.ff.nlist = nlist
 
         return self.init_nvt(
@@ -163,7 +163,7 @@ class NVTStepper:
         outcome explicitly requests otherwise. MACE-MD retains its MACE
         energy/neighbor functions; classical MD rebuilds from the new topology.
         """
-        if self.md_energy_fn is None:
+        if getattr(self, 'md_energy_fn', None) is None:
             # Classical MD: a topology change changes the force function.
             self.set_forcefield(outcome.ff)
         else:
@@ -192,7 +192,7 @@ class NVTStepper:
         state = self.refresh_force(state, nlist)
         self.nlist = nlist
 
-        if self.md_energy_fn is None:
+        if getattr(self, 'md_energy_fn', None) is None:
             # Never store a MACE neighbor list on the classical force field.
             self.ff.nlist = nlist
 

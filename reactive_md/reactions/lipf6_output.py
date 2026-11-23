@@ -202,7 +202,8 @@ class LiPF6OutputObserver:
 
     def __init__(self, *, cfg, box, masses, atom_ids=None, atom_types=None,
                  dump_file=None, dump_writer=None, event_file=None,
-                 candidate_file=None, resume=False):
+                 candidate_file=None, resume=False,
+                 md_energy_fn=None, md_neighbor_fn=None):
         self.cfg = cfg
         self.resume = bool(resume)
         self.box = box
@@ -221,6 +222,12 @@ class LiPF6OutputObserver:
         self.pre_reacted_count = 0
         self.accepted_events = 0
         self.disp_fn = None
+        if (md_energy_fn is None) != (md_neighbor_fn is None):
+            raise ValueError(
+                "md_energy_fn and md_neighbor_fn must be provided together"
+            )
+        self.md_energy_fn = md_energy_fn
+        self.md_neighbor_fn = md_neighbor_fn
         if self.resume:
             # A restart must not open an existing output with 'w' or 'x':
             # those modes destroy it before checkpoint restoration can run.
@@ -344,7 +351,25 @@ class LiPF6OutputObserver:
         state = observation.state
         self.disp_fn = observation.ff.disp_fn
         self._unwrap_to(state.position)
-        energy = observation.ff.energy_fn(state.position, observation.ff.nlist)['total']
+        if self.md_energy_fn is None:
+            energy = observation.ff.energy_fn(
+                state.position, observation.ff.nlist
+            )['total']
+        else:
+            extra_capacity = 2
+            for _ in range(13):
+                neighbors = self.md_neighbor_fn.allocate(
+                    state.position, extra_capacity=extra_capacity
+                )
+                neighbors = neighbors.update(state.position)
+                if not bool(jnp.asarray(neighbors.did_buffer_overflow)):
+                    break
+                extra_capacity = max(8, 2 * extra_capacity)
+            else:
+                raise RuntimeError(
+                    "MACE observer neighbor-list allocation overflowed"
+                )
+            energy = self.md_energy_fn(state.position, neighbors)
         energy.block_until_ready()
         kinetic = 0.5 * jnp.sum(self.masses[:, None] * state.velocity ** 2)
         kinetic.block_until_ready()

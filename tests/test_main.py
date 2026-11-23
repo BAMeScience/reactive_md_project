@@ -4,6 +4,7 @@ import types
 
 from reactive_md.config import SimConfig
 import reactive_md.main as main_mod
+from reactive_md.apps import lipf6 as lipf6_app
 
 def test_main_smoke_with_mocked_parser(monkeypatch):
     # Provide a minimal parse_lammps_data output matching your contract
@@ -26,7 +27,7 @@ def test_main_smoke_with_mocked_parser(monkeypatch):
         atom_types = np.array([1,1], dtype=np.int32)
         return positions, bonds, angles, torsions, impropers, nonbonded, molecule_id, box, masses, atom_types
 
-    monkeypatch.setattr(main_mod, "parse_lammps_data", fake_parse_lammps_data)
+    monkeypatch.setattr(lipf6_app, "parse_lammps_data", fake_parse_lammps_data)
 
     # prevent MD from running long: make steps very small
     cfg = SimConfig(steps=2, check_every=1, max_events=0)

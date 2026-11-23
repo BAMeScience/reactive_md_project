@@ -21,9 +21,23 @@ class MaceJaxEnergyEvaluator:
     def energy(self, R) -> float:
         R = jnp.asarray(R)
 
-        # Allocation is intentionally outside jit.
-        nbrs = self.neighbor_fn.allocate(R, extra_capacity=2)
-        nbrs = nbrs.update(R)
+        # Allocation and overflow recovery are intentionally outside jit.
+        extra_capacity = 2
+        for _ in range(13):
+            nbrs = self.neighbor_fn.allocate(
+                R, extra_capacity=extra_capacity
+            )
+            nbrs = nbrs.update(R)
+
+            if not bool(np.asarray(nbrs.did_buffer_overflow)):
+                break
+
+            extra_capacity = max(8, 2 * extra_capacity)
+        else:
+            raise RuntimeError(
+                "MACE MC neighbor-list allocation overflowed "
+                "after capacity growth"
+            )
 
         E = self._energy(R, nbrs)
         E.block_until_ready()

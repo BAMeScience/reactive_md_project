@@ -151,10 +151,6 @@ def run_md_nvt(
                 "Checkpoint/restart is not yet supported for MACE-MD"
             )
 
-        if observers:
-            raise NotImplementedError(
-                "MACE-MD observer output is not yet supported"
-            )
 
     if cfg.steps < 0 or cfg.max_events < 0:
         raise ValueError('steps and max_events must be nonnegative')
@@ -217,14 +213,32 @@ def run_md_nvt(
             state, sys, saved['forcefield_options'], active_energy_offset, box
         )
         # Do not call initialize(): that would reset Nose-Hoover variables.
-        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses, md_energy_fn=md_energy_fn, md_neighbor_fn=md_neighbor_fn,)
+        stepper = NVTStepper(
+                cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
+                **(
+                    {
+                        "md_energy_fn": md_energy_fn,
+                        "md_neighbor_fn": md_neighbor_fn,
+                    }
+                    if mace_md else {}
+                ),
+            )
         md_nlist = ff.nlist
         _restore_observers(observers, saved['observer_state'])
     else:
-        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses, md_energy_fn=md_energy_fn, md_neighbor_fn=md_neighbor_fn,)
+        stepper = NVTStepper(
+                cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
+                **(
+                    {
+                        "md_energy_fn": md_energy_fn,
+                        "md_neighbor_fn": md_neighbor_fn,
+                    }
+                    if mace_md else {}
+                ),
+            )
         key, sub = jax.random.split(key)
         state = stepper.initialize(sub, init_positions)
-        md_nlist = stepper.nlist
+        md_nlist = getattr(stepper, "nlist", ff.nlist)
 
     def notify(outcome=None, pre_positions=None):
         observation = MDObservation(
