@@ -34,6 +34,8 @@ def run_md_nvt_with_reactions(
     checkpoint_path: str | None = None,
     checkpoint_every_steps: int | None = None,
     restart_path: str | None = None,
+    md_energy_fn=None,
+    md_neighbor_fn=None,
 ):
     """Maintain the legacy LiPF6 public signature and return type.
 
@@ -50,10 +52,12 @@ def run_md_nvt_with_reactions(
         key, cfg=cfg, init_positions=init_positions, masses=masses,
         shift_fn=shift_fn, ff=ff, sys=sys, box=box,
         reaction_handler=LiPF6Handler(reaction_step_fn, passes_velocities=passes_velocities),
-        observers=(observer,),
+        observers=() if md_energy_fn is not None else (observer,),
         checkpoint_path=checkpoint_path,
         checkpoint_every_steps=checkpoint_every_steps,
         restart_path=restart_path,
+        md_energy_fn=md_energy_fn,
+        md_neighbor_fn=md_neighbor_fn,
     )
     print('Done.')
     print(f'Total accepted events: {result.accepted_events}')

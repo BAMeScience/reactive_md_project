@@ -124,6 +124,8 @@ def run_md_nvt(
     checkpoint_every_steps: int | None = None,
     restart_path: str | None = None,
     energy_offset: float | None = None,
+    md_energy_fn=None,
+    md_neighbor_fn=None,
 ) -> MDRunResult:
     """Generic NVT driver with optional checkpoint/restart.
 
@@ -136,6 +138,24 @@ def run_md_nvt(
     The caller must construct the reaction handler (including its unreacted
     reference topology) from the original input before invoking this driver.
     """
+    if (md_energy_fn is None) != (md_neighbor_fn is None):
+        raise ValueError(
+            "md_energy_fn and md_neighbor_fn must be provided together"
+        )
+
+    mace_md = md_energy_fn is not None
+
+    if mace_md:
+        if checkpoint_path is not None or restart_path is not None:
+            raise NotImplementedError(
+                "Checkpoint/restart is not yet supported for MACE-MD"
+            )
+
+        if observers:
+            raise NotImplementedError(
+                "MACE-MD observer output is not yet supported"
+            )
+
     if cfg.steps < 0 or cfg.max_events < 0:
         raise ValueError('steps and max_events must be nonnegative')
     if int(cfg.check_every) <= 0:
@@ -197,12 +217,14 @@ def run_md_nvt(
             state, sys, saved['forcefield_options'], active_energy_offset, box
         )
         # Do not call initialize(): that would reset Nose-Hoover variables.
-        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
+        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses, md_energy_fn=md_energy_fn, md_neighbor_fn=md_neighbor_fn,)
+        md_nlist = ff.nlist
         _restore_observers(observers, saved['observer_state'])
     else:
-        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses)
+        stepper = NVTStepper(cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses, md_energy_fn=md_energy_fn, md_neighbor_fn=md_neighbor_fn,)
         key, sub = jax.random.split(key)
         state = stepper.initialize(sub, init_positions)
+        md_nlist = stepper.nlist
 
     def notify(outcome=None, pre_positions=None):
         observation = MDObservation(
@@ -247,8 +269,34 @@ def run_md_nvt(
     # On restart, the saved step has already been emitted. Do not duplicate it.
     while steps_done < cfg.steps and accepted_events < cfg.max_events:
         chunk = min(int(cfg.check_every), int(cfg.steps - steps_done))
-        state, ff.nlist = stepper.advance(state, ff.nlist, chunk=chunk)
+
+        state, md_nlist = stepper.advance(
+            state, md_nlist, chunk=chunk
+        )
+
         steps_done += chunk
+
+        if mace_md:
+            # Reaction code still uses the classical force-field object.
+            # Its neighbor list must be valid at the current MACE-MD positions,
+            # and must never be replaced by the MACE neighbor list.
+            extra_capacity = 0
+            for _ in range(13):
+                classical_nlist = ff.neighbor_fn.allocate(
+                    state.position, extra_capacity=extra_capacity
+                )
+                if not bool(np.asarray(classical_nlist.did_buffer_overflow)):
+                    ff.nlist = classical_nlist
+                    break
+                extra_capacity = max(8, 2 * extra_capacity)
+            else:
+                raise RuntimeError(
+                    'Classical reaction neighbor-list allocation overflowed'
+                )
+        else:
+            # Preserve the existing classical MD neighbor-list behavior.
+            ff.nlist = md_nlist
+
         before = state.position
         # Optional pre-reaction observation: chemistry-specific diagnostics and
         # periodic trajectory frames must see the old topology and force field.
@@ -294,7 +342,9 @@ def run_md_nvt(
                 key, sub = jax.random.split(key)
             else:
                 sub = None
-            state, ff.nlist = stepper.synchronize(state, outcome, key=sub)
+            state, md_nlist = stepper.synchronize(state, outcome, key=sub)
+            if not mace_md:
+                ff.nlist = md_nlist
             relaxation_elapsed += float(outcome.relaxation_time_ps)
         notify(outcome, before)
         if (checkpoint_every_steps is not None
@@ -318,5 +368,4 @@ def __getattr__(name):
         from .reactions import a2_driver
         return getattr(a2_driver, name)
     raise AttributeError(name)
-
 

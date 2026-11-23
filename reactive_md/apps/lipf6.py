@@ -228,8 +228,12 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
     reaction.set_reference_state(sys)
 
     mc_energy_evaluator = None
-
-    if cfg.use_mace_mc:
+    md_energy_fn = None
+    md_neighbor_fn = None
+    # Classical Metropolis is the default when MACE-MC is disabled.
+    beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
+   
+    if cfg.use_mace_mc or cfg.use_mace_md:
         from ..mace_setup import build_mace_model
         from ..mace_energy import build_mace_energy_system
         from ..mace_mc_energy import MaceJaxEnergyEvaluator
@@ -274,17 +278,38 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             capacity_multiplier=cfg.mace_capacity_multiplier,
         )
 
-        mc_energy_evaluator = MaceJaxEnergyEvaluator(
-            neighbor_fn=mace_neighbor_fn,
-            make_energy_fn=mace_make_energy_fn,
-            box0=box,
-        )
+        if cfg.use_mace_md:
+           if cfg.md_unit_system == "real":
+              energy_factor = 23.0605489  # eV -> kcal/mol
+           elif cfg.md_unit_system == "metal":
+              energy_factor = 1.0          # eV -> eV
+           else:
+              raise ValueError(
+                 f"Unsupported MD unit system: {cfg.md_unit_system}"
+              )
 
-        print("Metropolis energy: MACE-JAX")
-        beta = 1.0 / (8.617333262e-5 * cfg.temperature_k)
-    else:
-        print("Metropolis energy: classical force field")
-        beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
+           def md_energy_fn(R, neighbor):
+               energy_eV = mace_make_energy_fn(neighbor)(
+                 R, box=box
+               )
+               return energy_factor * energy_eV
+
+           md_neighbor_fn = mace_neighbor_fn
+
+           print("MD forces: MACE-JAX")
+
+        if cfg.use_mace_mc:
+           mc_energy_evaluator = MaceJaxEnergyEvaluator(
+             neighbor_fn=mace_neighbor_fn,
+             make_energy_fn=mace_make_energy_fn,
+             box0=box,
+           )
+
+           print("Metropolis energy: MACE-JAX")
+           beta = 1.0 / (8.617333262e-5 * cfg.temperature_k)
+        else:
+           print("Metropolis energy: classical force field")
+           beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
     def reaction_step_fn(key, R, ff_in, sys_in, velocities):
         if cfg.reaction_mode == "rate":
@@ -310,6 +335,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                 relaxation_time_ps=cfg.relaxation_time_ps,
                 relaxation_tau_ps=cfg.relaxation_tau_ps,
                 reverse_rate_ps=cfg.reverse_rate_ps,
+                md_energy_fn=md_energy_fn,
+                md_neighbor_fn=md_neighbor_fn,
             )
 
         return maybe_react_one_event(
@@ -324,6 +351,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             sigma_mid=cfg.sigma_mid,
             sigma_width=cfg.sigma_width,
             mc_energy_evaluator=mc_energy_evaluator,
+            md_energy_fn=md_energy_fn,
+            md_neighbor_fn=md_neighbor_fn,
             candidate_log_top_n=cfg.candidate_log_top_n,
             velocities=velocities, masses=masses,
             temperature_k=cfg.temperature_k, kb_real=cfg.kb_real,
@@ -384,6 +413,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             checkpoint_path=checkpoint_path,
             checkpoint_every_steps=checkpoint_every_steps,
             restart_path=restart_path,
+            md_energy_fn=md_energy_fn,
+            md_neighbor_fn=md_neighbor_fn,
         )
 
     return _result
@@ -485,6 +516,11 @@ def cli(argv=None):
         action="store_true",
         help="Use MACE-JAX energies for Metropolis acceptance only.",
     )
+    parser.add_argument(
+        "--use-mace-md",
+        action="store_true",
+        help="Use MACE-JAX forces for NVT MD integration.",
+    )
     parser.add_argument("--mace-source", default=default_cfg.mace_source)
     parser.add_argument("--mace-variant", default=default_cfg.mace_variant)
     parser.add_argument(
@@ -539,6 +575,7 @@ def cli(argv=None):
         ),
         candidate_log_top_n=args.candidate_log_top_n,
         use_mace_mc=args.use_mace_mc,
+        use_mace_md=args.use_mace_md,
         mace_source=args.mace_source,
         mace_variant=args.mace_variant,
         mace_dr_threshold=args.mace_dr_threshold,
@@ -561,4 +598,5 @@ def cli(argv=None):
 
 if __name__ == "__main__":
     cli()
+
 

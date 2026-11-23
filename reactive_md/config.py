@@ -60,6 +60,7 @@ class SimConfig:
 
     # Optional MACE energy for Metropolis acceptance
     use_mace_mc: bool = False
+    use_mace_md: bool = False
     mace_source: str = "mp"
     mace_variant: str | None = None
     mace_dr_threshold: float = 0.5
