@@ -258,6 +258,8 @@ def maybe_react_one_event(
     sigma_mid: float = 0.0,
     sigma_width: float = 0.2,
     mc_energy_evaluator=None,
+    md_energy_fn=None,
+    md_neighbor_fn=None,
     candidate_log_top_n: int = 10,
     velocities=None,
     masses=None,
@@ -268,6 +270,9 @@ def maybe_react_one_event(
     relaxation_tau_ps: float = 0.01,
     allow_reverse: bool = False,
 ):
+
+    if (md_energy_fn is None) != (md_neighbor_fn is None):
+        raise ValueError("md_energy_fn and md_neighbor_fn must be provided together")
 
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
 
@@ -326,7 +331,7 @@ def maybe_react_one_event(
     )
 
     key, sub = jax.random.split(key)
-    u_sigma = float(jax.random.uniform(sub))
+    u_sigma = float(jax.random.uniform(sub,dtype=jnp.float32))
 
     if u_sigma >= p_sigma:
        return key, False, ff, sys, {
@@ -394,6 +399,8 @@ def maybe_react_one_event(
         temperature_k=temperature_k, kb_real=kb_real,
         dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
         thermostat_tau_ps=relaxation_tau_ps,
+        md_energy_fn=md_energy_fn,
+        md_neighbor_fn=md_neighbor_fn,
     )
 
     if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
@@ -452,7 +459,11 @@ def maybe_react_one_event(
     info["accepted_event"] = candidate_info
     info["_relaxed_velocities"] = v_relaxed
     info["relaxation_time_ps"] = relaxation_time_ps
-    ff_trial.nlist = nlist_relaxed
+    # The relaxation list belongs to the selected relaxation potential.
+    # Never attach a MACE neighbor list to the classical force field.
+    # The MACE-MD driver refreshes ff.nlist before the next reaction check.
+    if md_energy_fn is None:
+        ff_trial.nlist = nlist_relaxed
     return key, True, ff_trial, sys_new, info, R_relaxed
 
 
@@ -481,6 +492,8 @@ def maybe_react_rate_events(
     relaxation_time_ps: float = 5.0,
     relaxation_tau_ps: float = 0.01,
     reverse_rate_ps: float = 0.0,
+    md_energy_fn=None,
+    md_neighbor_fn=None,
 ):
     """Attempt rate-based reactions.
 
@@ -497,6 +510,8 @@ def maybe_react_rate_events(
     accumulated, followed by one final Langevin relaxation. Reverse events
     are disabled by default unless a nonzero reverse_rate_ps is supplied.
     """
+    if (md_energy_fn is None) != (md_neighbor_fn is None):
+        raise ValueError("md_energy_fn and md_neighbor_fn must be provided together")
 
     pf6_reacted_np = np.asarray(
         sys.pf6_reacted,
@@ -631,7 +646,7 @@ def maybe_react_rate_events(
         # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u_sigma = float(jax.random.uniform(sub))
+        u_sigma = float(jax.random.uniform(sub,dtype=jnp.float32))
 
         if u_sigma >= p_sigma:
             continue
@@ -644,7 +659,7 @@ def maybe_react_rate_events(
         # -----------------------------------------------------
 
         key, sub = jax.random.split(key)
-        u_rate = float(jax.random.uniform(sub))
+        u_rate = float(jax.random.uniform(sub,dtype=jnp.float32))
 
         if u_rate >= event_p_rate:
             continue
@@ -777,6 +792,8 @@ def maybe_react_rate_events(
         temperature_k=temperature_k, kb_real=kb_real,
         dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
         thermostat_tau_ps=relaxation_tau_ps,
+        md_energy_fn=md_energy_fn,
+        md_neighbor_fn=md_neighbor_fn,
     )
 
     if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
@@ -793,7 +810,9 @@ def maybe_react_rate_events(
             "candidate_records": candidate_records,
         }, R
 
-    ff_current.nlist = nlist_relaxed
+    # A MACE relaxation list must not be attached to the classical force field.
+    if md_energy_fn is None:
+        ff_current.nlist = nlist_relaxed
 
     first_event = accepted_events[0]
 

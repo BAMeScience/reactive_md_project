@@ -35,6 +35,8 @@ def langevin_relax_with_nlist(
     dt_ps: float = 0.00025,
     relaxation_time_ps: float = 1.0,
     thermostat_tau_ps: float = 0.01,
+    md_energy_fn=None,
+    md_neighbor_fn=None,
 ):
     """Relax post-reaction positions using JAX-MD Langevin dynamics.
 
@@ -43,7 +45,16 @@ def langevin_relax_with_nlist(
     No reaction parameters, force-field parameters, or time step are modified.
     Neighbor-list capacity grows adaptively on overflow. An overflowing chunk
     is never accepted, and its random-number state is rolled back as well.
+
+    When both optional MACE overrides are supplied, the returned neighbor list
+    belongs to the override, not to ``ff``.
     """
+    if (md_energy_fn is None) != (md_neighbor_fn is None):
+        raise ValueError(
+            "md_energy_fn and md_neighbor_fn must be provided together"
+        )
+    neighbor_fn = md_neighbor_fn if md_neighbor_fn is not None else ff.neighbor_fn
+
     dt_ps = float(dt_ps)
     relaxation_time_ps = float(relaxation_time_ps)
     thermostat_tau_ps = float(thermostat_tau_ps)
@@ -68,6 +79,8 @@ def langevin_relax_with_nlist(
     gamma = 1.0 / thermostat_tau_ps
 
     def energy_scalar(positions, neighbor):
+        if md_energy_fn is not None:
+            return md_energy_fn(positions, neighbor)
         return ff.energy_fn(positions, neighbor)["total"]
 
     init_fn, apply_fn = simulate.nvt_langevin(
@@ -81,7 +94,7 @@ def langevin_relax_with_nlist(
     def allocate_valid_nlist(positions, *, extra_capacity=0):
         """Allocate outside JIT; grow storage until no overflow is reported."""
         for attempt in range(_MAX_NLIST_RETRIES + 1):
-            nl = ff.neighbor_fn.allocate(
+            nl = neighbor_fn.allocate(
                 positions, extra_capacity=extra_capacity
             )
             if not bool(np.asarray(nl.did_buffer_overflow)):
@@ -108,7 +121,7 @@ def langevin_relax_with_nlist(
     def run_chunk(state, nlist, *, chunk):
         def body(carry, _):
             current_state, current_nlist, overflow_seen = carry
-            current_nlist = ff.neighbor_fn.update(
+            current_nlist = neighbor_fn.update(
                 current_state.position, current_nlist
             )
             overflow_seen = jnp.logical_or(
@@ -125,7 +138,7 @@ def langevin_relax_with_nlist(
         )
         # The final integrator step moves the particles after the preceding
         # list update. Validate the list at the final coordinates too.
-        trial_nlist = ff.neighbor_fn.update(
+        trial_nlist = neighbor_fn.update(
             trial_state.position, trial_nlist
         )
         overflow_seen = jnp.logical_or(
@@ -193,3 +206,4 @@ def langevin_relax_with_nlist(
         state.momentum / mass[:, None],
         nlist,
     )
+

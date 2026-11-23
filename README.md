@@ -1,560 +1,218 @@
-> **Phase 7:** Fixed-configuration MC energy audit: see [PHASE7_FIXED_CONFIGURATION_ENERGY_AUDIT.md](PHASE7_FIXED_CONFIGURATION_ENERGY_AUDIT.md). This is an optional diagnostic; the simulation algorithms are unchanged.
-
-> **rs@md paper reproduction status (2026-10-29):** The A2 `metropolis` path has been replaced by the paper's Figure 3a trial-relaxation/Metropolis workflow. The historical fixed-coordinate MH validation is **not** a validation of this algorithm. For scope, density, energy-mode audit, and HPC test commands see [PAPER_REPRODUCTION_STATUS.md](PAPER_REPRODUCTION_STATUS.md). PEL II and NPT are postponed. Phase 5 energy-source audit: [PAPER_SOURCE_CODE_AUDIT_PHASE5.md](PAPER_SOURCE_CODE_AUDIT_PHASE5.md).
-
-# reactive_md_project
-
 # reactive-md
 
-## Current development architecture
+Reactive molecular dynamics with topology-changing reactions, built on [JAX-MD](https://github.com/jax-md/jax-md). The development repository supports classical OPLS-AA molecular dynamics, rate-based and Metropolis reaction schemes, and optional [MACE-JAX](https://github.com/ACEsuit/mace-jax) energy and force evaluation.
 
-This is the **single development repository**. The original 100 ns A2
-simulation is a read-only scientific reference; do not overwrite its code or
-Python environment. The current structure separates:
+> **Development status (November 2026):** Short LiPF6 benchmarks have demonstrated MACE-JAX NVT integration and one accepted reaction in each of the rate and MACE-Metropolis modes. These are integration smoke tests, **not** production validation. Reactive runs have shown GPU memory-allocation warnings, and longer reactive runs and MD continuation after accepted reactions still need validation. See [Validation status](#validation-status-and-known-limitations).
 
-- `reactive_md/engine/contracts.py`: chemistry-neutral reaction and observer contracts
-- `reactive_md/engine/nvt.py`: Nose-Hoover NVT integration and neighbor-list recovery
-- `reactive_md/md_driver.py`: generic MD loop, reaction dispatch, and observer notifications
-- `reactive_md/reactions/`: A2 rate, A2 Metropolis and LiPF6 handlers/output adapters
-- `tools/audit_a2_trajectory.py`: dependency-free 100 ns CSV consistency checker
+## Features
 
-Legacy `run_md_nvt_a2` and `run_md_nvt_with_reactions` imports remain supported.
-The original small/reversible A2 example scripts are restored in `scripts/`.
-See `DEVELOPMENT_STATUS.md` for verified tests and outstanding JAX-MD validation.
+- Classical OPLS-AA force-field energy and Nose-Hoover NVT dynamics.
+- Topology-changing reactions with a chemistry-neutral MD driver and reaction handlers.
+- LiPF6 decomposition example, with rate-based or sigma-gated Metropolis proposals.
+- Optional activation-energy-derived reaction rates.
+- Optional MACE-JAX **MD forces** (`--use-mace-md`) and **Metropolis energies** (`--use-mace-mc`), independently selectable.
+- Post-reaction Langevin relaxation and neighbor-list/force synchronization. The MACE-backed relaxation path is under active integration testing.
+- Experimental A2 reaction handlers and compatibility entry points.
 
----
+## Installation
 
-Reactive molecular dynamics framework for topology-changing simulations using JAX-MD.
+Requires Python 3.12 or later and a JAX/JAX-MD-compatible environment. From the repository root:
 
-The package supports:
+```bash
+python -m pip install -e .
+```
 
-- Classical OPLS-AA force fields
-- Stochastic topology-changing reactions
-- Metropolis-based reaction acceptance
-- Rate-based reaction kinetics
-- Activation-energy-driven reaction kinetics (rs@MD / Heuer-style)
-- Optional MACE-JAX / MLIP energy evaluation for the Metropolis reaction acceptance step
+For development and MACE support:
 
-The current implementation includes a LiPF6 decomposition example:
+```bash
+python -m pip install -e ".[dev,mace]"
+```
+
+The repository's `pyproject.toml` specifies the development dependencies. On a GPU cluster, install a CUDA-enabled JAX build compatible with the cluster's drivers and CUDA runtime; follow the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html). Do not assume a CPU JAX installation provides GPU support.
+
+## Running LiPF6 simulations
+
+The LiPF6 application accepts a LAMMPS data file and a corresponding settings file. The application CLI can be invoked directly:
+
+```bash
+python -m reactive_md.apps.lipf6 --help
+```
+
+The package also defines a `reactive-md` console entry point. Check `reactive-md --help` for the options exposed by the installed checkout.
+
+### Classical NVT with rate-based reactions
+
+```bash
+python -m reactive_md.apps.lipf6 \
+  --data system.data \
+  --settings system.in.settings \
+  --steps 1000 \
+  --check-every 10 \
+  --reaction-mode rate \
+  --reaction-rate-ps 0.01 \
+  --sigma-mid 0.0 \
+  --sigma-width 0.2
+```
+
+### Classical MD with MACE Metropolis energies
+
+```bash
+python -m reactive_md.apps.lipf6 \
+  --data system.data \
+  --settings system.in.settings \
+  --reaction-mode metropolis \
+  --use-mace-mc \
+  --mace-source mp \
+  --mace-variant small-0b2
+```
+
+Here the MD forces remain classical; MACE-JAX is used for the Metropolis energy evaluations.
+
+### MACE MD with rate-based reactions
+
+```bash
+python -m reactive_md.apps.lipf6 \
+  --data system.data \
+  --settings system.in.settings \
+  --steps 100 \
+  --check-every 10 \
+  --reaction-mode rate \
+  --reaction-rate-ps 0.01 \
+  --use-mace-md \
+  --mace-source mp \
+  --mace-variant small-0b2
+```
+
+### MACE MD with MACE Metropolis energies
+
+```bash
+python -m reactive_md.apps.lipf6 \
+  --data system.data \
+  --settings system.in.settings \
+  --reaction-mode metropolis \
+  --use-mace-md \
+  --use-mace-mc \
+  --mace-source mp \
+  --mace-variant small-0b2
+```
+
+The MACE flags select different components:
+
+| `--use-mace-md` | `--use-mace-mc` | NVT forces | Metropolis energy |
+| --- | --- | --- | --- |
+| Off | Off | Classical | Classical |
+| Off | On | Classical | MACE-JAX |
+| On | Off | MACE-JAX | Classical |
+| On | On | MACE-JAX | MACE-JAX |
+
+The Metropolis-energy column applies only to `--reaction-mode metropolis`; rate mode does not use a Metropolis energy test. In MACE MD mode, post-reaction relaxation is intended to use the selected MACE MD energy/forces; verify that wiring in the current checkout before production use.
+
+## LiPF6 reaction model
+
+The example models
 
 ```text
 LiPF6 <-> LiF + PF5
 ```
 
-The LiPF6 reaction is controlled by a single reaction coordinate
+using the reaction coordinate
 
 ```text
 sigma = d(P-F) - d(Li-F)
 ```
 
-where the selected F atom is the leaving fluorine. Negative sigma values are reactant-like, while positive sigma values are product-like. Forward candidates are ranked by sigma. Reverse candidates are restricted to the *recorded* leaving F and Li, with finite P-F and Li-F proximity cutoffs; LiF has no explicit Li-F bond. Reverse reactions are **off by default** in both modes.
+where F is the selected leaving fluorine. Negative sigma is reactant-like; positive sigma is product-like. `--sigma-mid` sets the midpoint of the sigmoid geometric factor, and `--sigma-width` controls its transition width. Candidates are ranked by sigma. Reverse reactions are disabled by default; reverse proposals use the recorded leaving F and Li partner rather than arbitrary new partners.
 
----
+### Rate mode
 
-# Installation
-
-## Basic installation
-
-Clone the repository:
-
-```bash
-git clone https://github.com/BAMeScience/reactive_md_project.git
-cd reactive_md_project
-```
-
-Install in editable mode:
-
-```bash
-pip install -e .
-```
-
-or with uv:
-
-```bash
-uv pip install -e .
-```
-
-## Running tests on HPC
-
-Run from the repository root in the development environment:
-
-```bash
-python -m pytest -q tests/
-# Or through SLURM:
-srun --gres=gpu:1 --time=00:10:00 python -m pytest -q tests/
-```
-
-Pytest is configured with `pythonpath = ["."]` so imports from the
-repository-local `scripts/` package work with either `pytest` or
-`python -m pytest`. If test collection refers to `tests/test_reaction.py` or
-`tests/test_topology_opls.py`, the checkout contains tests **not shipped in
-this development archive**. Back up those old tests before migrating them;
-they refer to interfaces absent from the current implementation. A clean
-checkout is preferable to extracting the archive over an older source tree.
-
-## Development installation
-
-Install the package together with the test/development tools:
-
-```bash
-uv pip install -e .
-uv pip install pytest ruff
-```
-
-Alternatively, install the included development extras:
-
-```bash
-uv pip install -e ".[dev]"
-```
-
----
-
-## Installation with MACE support
-
-For MACE-assisted reaction acceptance:
-
-```bash
-uv pip install -e ".[mace]"
-```
-
-The currently tested dependency stack is:
+In rate mode, an eligible candidate is subjected to geometric and rate-probability gates. The current algorithm uses the first-order probability
 
 ```text
-jax     0.10.1
-jaxlib  0.10.1
-flax    0.12.2
-haiku   0.0.16
+p = f(sigma) * k_base * dt_reactive
 ```
 
-For GPU support, install the appropriate CUDA-enabled JAX version, for example:
+where `f(sigma)` is the geometric factor and `dt_reactive` is the time between reaction checks. It is not the exact Poisson expression `1 - exp(-k_eff * dt_reactive)`. The base-rate gate must not exceed one. `k_base` can be specified with `--reaction-rate-ps` or derived from an activation energy with `--activation-energy-eV`.
 
-```bash
-uv pip install -U "jax[cuda13]"
-```
-
----
-
-# Running a Simulation
-
-The package provides the command-line executable:
-
-```bash
-reactive-md
-```
-
-Display all available options:
-
-```bash
-reactive-md --help
-```
-
----
-
-# Input Files
-
-The code requires:
-
-1. A LAMMPS data file
-2. A LAMMPS settings file
-
-Example:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings
-```
-
----
-
-# Reaction Coordinate
-
-The LiPF6 decomposition reaction uses the Fattebert-inspired coordinate:
+For an activation barrier, the transition-state-theory base rate is
 
 ```text
-sigma = d(P-F) - d(Li-F)
+k(T) = (k_B * T / h) * exp(-E_a / (k_B * T))
 ```
 
-Interpretation:
+The optional reverse rate is configured separately using `--reverse-rate-ps`; it is not inferred from the forward barrier.
 
-- `sigma < 0`: the leaving F is closer to P than to Li, so the geometry is PF6-like.
-- `sigma = 0`: the leaving F is equally distant from P and Li.
-- `sigma > 0`: the leaving F is closer to Li than to P, so the geometry is product-like.
+### Metropolis mode
 
-Candidate reactions are ranked by sigma. The reaction probability is derived from sigma using a smooth sigmoid-like factor controlled by:
+Metropolis mode first uses the sigma-dependent geometric factor to decide whether to propose a reaction. The trial topology and geometry are then prepared and Langevin-relaxed. Energies of the original and trial configurations are evaluated using the selected classical or MACE model, and the energy difference enters the Metropolis acceptance test. Non-finite trial energy differences are rejected.
 
-```text
---sigma-mid
---sigma-width
-```
+This sigma-gated, geometry-changing procedure is **not** a proven equilibrium Metropolis-Hastings sampler; proposal-density and reversibility considerations require separate validation. Experimental reverse proposals can be enabled with `--allow-reverse-mc`.
 
-`--sigma-mid` is the sigma value where the geometric reaction factor is 0.5. `--sigma-width` controls how sharply the probability changes around `sigma_mid`.
+### Relaxation
 
-Example:
+Accepted rate-mode reactions and Metropolis trial proposals use Langevin relaxation. The principal settings are `--relaxation-dt-ps`, `--relaxation-time-ps`, and `--relaxation-tau-ps`. The resulting positions and velocities are passed to the MD driver; accepted topology changes require a refreshed force and a valid MD neighbor list.
+
+## Output and tests
+
+The LiPF6 application supports trajectory dumps, event logs, and candidate logs. For example:
 
 ```bash
-reactive-md \
+python -m reactive_md.apps.lipf6 \
   --data system.data \
   --settings system.in.settings \
-  --reaction-mode rate \
-  --reaction-rate-ps 0.01 \
-  --sigma-mid 0.0 \
-  --sigma-width 0.2
-```
-
-
----
-
-# Reaction Modes
-
-## 1. Metropolis Mode
-
-Topology changes are proposed using the reaction coordinate σ and accepted according to a hybrid kinetic/thermodynamic Metropolis scheme.
-
-The reaction coordinate σ is first evaluated to determine whether a reaction trial should be attempted. Only if this kinetic condition is satisfied is the expensive trial topology generated, Langevin-relaxed, and evaluated with the selected energy model (classical force field or MACE). The final thermodynamic acceptance is then determined using the Metropolis criterion based on the energy difference ΔE. Trial reactions yielding non-finite energy differences are automatically rejected.
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --reaction-mode metropolis \
-  --sigma-mid 0.0 \
-  --sigma-width 0.2
-```
-
-In classical mode, the Metropolis energy difference is computed with the classical force field. If MACE support is enabled, the Metropolis energy difference is evaluated with MACE-JAX instead.
-
-## 2. Rate-Based Mode
-
-Topology changes are accepted according to a prescribed base reaction rate modulated by the sigma-dependent geometric factor:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --reaction-mode rate \
-  --reaction-rate-ps 0.01 \
-  --sigma-mid 0.0 \
-  --sigma-width 0.2
-```
-
-The effective rate is
-
-```text
-k_eff = k_base * f(sigma)
-```
-
-and the reaction probability during one reactive interval is
-
-```text
-p = f(sigma) * k_base * dt  (linear approximation, with k_base * dt <= 1)
-```
-
-where:
-
-- `k_base` is the prescribed or activation-energy-derived base rate in ps^-1.
-- `f(sigma)` is the sigma-dependent geometric factor.
-- `dt` is the reactive check interval.
-
-The exact constant-rate Poisson probability would be `1-exp(-k_eff*dt)`;
-this implementation intentionally uses its first-order approximation. The
-rate implementation uses two independent Bernoulli gates (`f(sigma)` and
-`k_base*dt`), whose joint probability is the expression above. The optional
-reverse rate uses `f(-sigma) * k_reverse * dt` and defaults to zero.
-
-To enable reverse rate attempts, pass `--reverse-rate-ps VALUE`. A nonzero
-reverse rate requires a justified parameter; it is not inferred from the
-forward activation barrier. In Metropolis mode, pass `--allow-reverse-mc` to
-allow exploratory reverse proposals. The hybrid sigma-gated Metropolis
-algorithm is **not** an MH-corrected equilibrium sampler.
-
-All accepted LiPF6 events use the shared post-reaction Langevin relaxation
-(defaults: `--relaxation-dt-ps 0.00025`, `--relaxation-time-ps 5.0`,
-`--relaxation-tau-ps 0.01`). The resulting velocities are passed back to the
-NVT driver, and its thermostat is reinitialized. These parameters should be
-validated for LiPF6 before production runs.
-
-## 3. Activation-Energy Mode
-
-Instead of specifying a reaction rate directly, provide an activation barrier:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --reaction-mode rate \
-  --activation-energy-eV 0.20 \
-  --sigma-mid 0.0 \
-  --sigma-width 0.2
-```
-
-The base reaction rate is computed using transition-state theory:
-
-```text
-k(T) = (kB * T / h) * exp(-Ea / (kB * T))
-```
-
-and then modulated by the sigma-dependent geometric factor.
-
----
-
-# MACE-Assisted Reaction Acceptance
-
-To evaluate reaction energies with MACE-JAX:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --reaction-mode metropolis \
-  --use-mace-mc
-```
-
-The molecular dynamics trajectory still uses the classical force field. MACE is used only for the Metropolis reaction acceptance energy evaluation. The post-proposal Langevin relaxation uses the product-side classical force field; its relaxed velocities are returned to the NVT driver.
-
----
-
-# Trajectory Output
-
-Write a LAMMPS-style trajectory:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --dump-file traj.dump
-```
-
-Compressed output:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --dump-file traj.dump.gz
-```
-
----
-
-# Event and Candidate Logging
-
-Record accepted reactions:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
-  --event-log-file reactions.csv
-```
-
-Record sigma-ranked reaction candidates:
-
-```bash
-reactive-md \
-  --data system.data \
-  --settings system.in.settings \
+  --dump-file traj.dump \
+  --event-log-file reactions.csv \
   --candidate-log-file candidates.csv \
   --candidate-log-top-n 20
 ```
 
-The candidate log contains sigma-ranked candidates. It no longer contains `passes_lif`, `passes_pf`, or `passes_all`, because those belonged to the old hard-distance-gated model.
+Output availability and checkpoint/restart support can depend on the MD backend. In particular, MACE-MD output and restart workflows are not yet validated; do not rely on them for production runs without testing the current checkout.
 
-Useful diagnostic columns include:
-
-```text
-step, mode, rank, pf6_index, li_idx, leave_F, d_lif, d_pf, sigma, accepted
-```
-
----
-
-# Development
-
-Run tests:
+Run the repository tests with:
 
 ```bash
-pytest
+python -m pytest -q tests/
 ```
 
-Run only the reaction-coordinate tests:
+## Validation status and known limitations
 
-```bash
-pytest tests/test_reaction_sigma.py
-```
+The following results were observed on a 5,264-atom LiPF6-containing system with the Materials Project MACE `small-0b2` variant:
 
-Run with verbose output:
+| Integration check | Observed result |
+| --- | --- |
+| MACE-JAX NVT, 30 steps, reactions disabled | Completed; final positions, momenta, and forces finite |
+| MACE-JAX MD + rate-mode reaction, minimal run | One accepted event; one PF6 unit reacted |
+| MACE-JAX MD + MACE Metropolis, minimal run | MACE energy evaluations completed; one accepted event |
+| MD continuation after an accepted event | Not yet established by these tests |
+| Longer reactive MACE simulations | Not validated; a previous run failed with GPU out-of-memory |
 
-```bash
-pytest -v
-```
+Both minimal reactive benchmarks produced a **7.71 GiB GPU allocation warning** but completed. The cause has not yet been isolated; potential contributors include MACE force/relaxation compilation, temporary buffers, and neighbor-list memory. These observations do not establish numerical accuracy, thermodynamic sampling correctness, or long-term stability.
 
----
+The artificial reaction parameters used in the smoke tests were selected to exercise code paths; **do not use them as physical production parameters**.
 
-# Project Structure
+## Repository architecture
 
-```text
-reactive_md/
-├── config.py
-├── forcefield.py
-├── reaction.py
-├── md_driver.py
-├── main.py
-├── lammps_io.py
-├── extract_params_oplsaa.py
-├── reactions/
-│   ├── lipf6.py
-│   └── templates_pf5.py
+| Component | Responsibility |
+| --- | --- |
+| `reactive_md/engine/contracts.py` | Chemistry-neutral reaction and observer contracts |
+| `reactive_md/engine/nvt.py` | Nose-Hoover NVT stepping and neighbor-list recovery |
+| `reactive_md/md_driver.py` | Generic MD loop, reaction dispatch, synchronization, observers |
+| `reactive_md/reactions/` | LiPF6 and A2 reaction handlers and output adapters |
+| `reactive_md/reaction.py` | LiPF6 reaction proposals and acceptance logic |
+| `reactive_md/relaxation.py` | Post-reaction Langevin relaxation |
+| `reactive_md/mace_setup.py`, `mace_energy.py`, `mace_mc_energy.py` | MACE-JAX model setup, energy functions, MC evaluator |
+| `reactive_md/apps/lipf6.py` | LiPF6 application and CLI in the current development layout |
 
-tests/
-├── test_candidate_selection.py
-├── test_config.py
-├── test_forcefield.py
-├── test_lipf6.py
-├── test_main.py
-├── test_main_cli.py
-├── test_md_driver.py
-├── test_metropolis.py
-├── test_reaction_coordinate.py
-├── test_template_pf5.py
-└── test_topology_change.py
+Compatibility imports such as `run_md_nvt_a2` and `run_md_nvt_with_reactions` are retained. The A2 reference simulation and its historical validation results should not be treated as validation of the newer LiPF6/MACE workflow.
 
-| Test                          | Purpose                                         |
-| ----------------------------- | ----------------------------------------------- |
-| `test_candidate_selection.py` | Reaction candidate identification and ranking.  |
-| `test_config.py`              | Configuration defaults and validation.          |
-| `test_forcefield.py`          | Force-field construction and evaluation.        |
-| `test_lipf6.py`               | LiPF₆ topology and chemistry utilities.         |
-| `test_main.py`                | Core simulation workflow.                       |
-| `test_main_cli.py`            | Command-line interface.                         |
-| `test_md_driver.py`           | MD driver and reaction integration.             |
-| `test_metropolis.py`          | Metropolis acceptance criterion.                |
-| `test_reaction_coordinate.py` | Reaction coordinate (σ) evaluation.             |
-| `test_template_pf5.py`        | PF₅ template generation.                        |
-| `test_topology_change.py`     | Topology modification after accepted reactions. |
+## References
 
+- Schoenholz, S. S. and Cubuk, E. D. (2020), *JAX M.D.: A Framework for Differentiable Physics*, NeurIPS. [Paper](https://papers.nips.cc/paper/2020/file/83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf).
+- Batatia, I. et al. (2022), *MACE: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields*, NeurIPS. [Paper](https://openreview.net/forum?id=YPpSngE-ZU).
+- [MACE-JAX repository](https://github.com/ACEsuit/mace-jax).
+- Heuer and co-workers, *Journal of Chemical Theory and Computation* **17** (2021), 1074-1085 (rs@MD methodology).
+- *Journal of The Electrochemical Society* **171** (2024), 080505 (LiPF6 reaction-coordinate motivation).
 
-```
+## License
 
----
+See [LICENSE](LICENSE).
 
-# Citation
-
-If you use this software in academic work, please cite:
-
-- JAX-MD
-```
- @inproceedings{jaxmd2020,
-  author = {Schoenholz, Samuel S. and Cubuk, Ekin D.},
-  booktitle = {Advances in Neural Information Processing Systems},
-  publisher = {Curran Associates, Inc.},
-  title = {JAX M.D. A Framework for Differentiable Physics},
-  url = {https://papers.nips.cc/paper/2020/file/83d3d4b6c9579515e1679aca8cbc8033-Paper.pdf},
-  volume = {33},
-  year = {2020}
- }
-```
-
-- MACE / MACE-JAX, if used
- https://github.com/ACEsuit/mace-jax
- ```bibtex
-@inproceedings{Batatia2022mace,
-  title={{MACE}: Higher Order Equivariant Message Passing Neural Networks for Fast and Accurate Force Fields},
-  author={Ilyes Batatia and David Peter Kovacs and Gregor N. C. Simm and Christoph Ortner and Gabor Csanyi},
-  booktitle={Advances in Neural Information Processing Systems},
-  editor={Alice H. Oh and Alekh Agarwal and Danielle Belgrave and Kyunghyun Cho},
-  year={2022},
-  url={https://openreview.net/forum?id=YPpSngE-ZU}
-}
-
-@misc{Batatia2022Design,
-  title = {The Design Space of E(3)-Equivariant Atom-Centered Interatomic Potentials},
-  author = {Batatia, Ilyes and Batzner, Simon and Kov{\'a}cs, D{\'a}vid P{\'e}ter and Musaelian, Albert and Simm, Gregor N. C. and Drautz, Ralf and Ortner, Christoph and Kozinsky, Boris and Cs{\'a}nyi, G{\'a}bor},
-  year = {2022},
-  number = {arXiv:2205.06643},
-  eprint = {2205.06643},
-  eprinttype = {arxiv},
-  doi = {10.48550/arXiv.2205.06643},
-  archiveprefix = {arXiv}
- } 
-```
-  
-- The original rs@MD methodology by Heuer and co-workers, J. Chem. Theory Comput. 2021, 17, 1074-1085
-- The ab initio work motivating the LiPF6 reaction coordinate, Journal of The Electrochemical Society, 2024 171 080505
-
----
-
-# License
-
-See LICENSE file.
-
----
-
-# Reaction plugins and the generic MD engine (experimental refactor)
-
-`reactive_md.md_driver` now owns **only** the generic Nose–Hoover NVT
-integrator, transactional neighbor-list overflow recovery, reaction-handler
-protocol, and observer dispatch. It contains no A2 or LiPF6 candidate logic.
-
-- `reactive_md.reactions.a2_handlers.A2RateHandler` wraps the existing A2
-  kinetic cycle, including its optional Langevin relaxation.
-- `reactive_md.reactions.a2_handlers.A2MetropolisHandler` wraps the
-  fixed-coordinate Metropolis–Hastings cycle.
-- `reactive_md.reactions.lipf6_handler.LiPF6Handler` adapts the existing
-  LiPF6 callback to the generic interface.
-- `reactive_md.observers.EnergyCSVObserver` and `EventJSONLObserver` implement
-  chemistry-neutral output formats.
-
-A generic simulation can be launched with the following pattern (using an
-already constructed force field, system state, box, and A2 reaction model):
-
-```python
-from reactive_md.md_driver import run_md_nvt
-from reactive_md.reactions.a2_handlers import A2MetropolisHandler
-from reactive_md.observers import EnergyCSVObserver, EventJSONLObserver
-
-handler = A2MetropolisHandler(reaction=reaction, rng=rng)
-with open('energy.csv', 'w') as energy_file, open('events.jsonl', 'w') as event_file:
-    result = run_md_nvt(
-        key, cfg=cfg, init_positions=R, masses=masses, shift_fn=shift_fn,
-        ff=ff, sys=system, box=box, reaction_handler=handler,
-        observers=(EnergyCSVObserver(energy_file), EventJSONLObserver(event_file)),
-    )
-```
-
-Existing entry points remain available:
-
-- `reactive_md.md_a2_driver.run_md_nvt_a2` preserves A2-specific RDF,
-  population history, LAMMPS dump, and CSV formats.
-- `reactive_md.md_driver.run_md_nvt_with_reactions` remains a lazy
-  compatibility alias for the LiPF6 driver.
-- `reactive_md.md_driver.run_md_nvt_a2` remains a lazy compatibility alias.
-
-Both compatibility drivers now use the same generic `run_md_nvt` engine.
-LiPF6-specific CSVs and trajectory dumps live in `reactions/lipf6_output.py`;
-the optional `on_before_reaction` hook captures pre-reaction energies and
-frames without adding chemistry-specific branches to the MD engine.
-
-The LiPF6 driver
-also benefits from overflow-checked MD chunks and a refreshed cached force
-following topology changes. That can change a trajectory compared with the
-previous implementation, so run numerical regression checks before production.
-
-The current A2 MC implementation is a *topology-only* sampler. Its attempt
-frequency is not a physical reaction rate. The target distribution uses the
-force-field energy (including the per-dimer energy offset); there is no
-independent chemical-potential or standard-state correction. Coordinate-changing
-MC proposals require their own reversible proposal-density correction.
-
-This archive **includes** the restored `scripts/` package imported by
-the small A2 tests. The original `jax-md` dependency is still required for
-integration tests. Do not deploy this experimental refactor into an ongoing
-production job without testing it in a separate environment.
-
-## Development refactor status
-
-See [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md) for the single-repository
-plugin refactor, compatibility guarantees, test results, and outstanding
-validation before production use.
-
-### Phase 6: Paired NVT pilot
-
-See [PHASE6_PAIRED_NVT_PILOT.md](PHASE6_PAIRED_NVT_PILOT.md) for a short, matched-initial-condition MC/rate diagnostic with explicit rate/cutoff inputs, MC attempt energies, and a machine-readable report. It is **not** a published NPT benchmark.

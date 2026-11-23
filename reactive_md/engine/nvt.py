@@ -14,6 +14,7 @@ import numpy as np
 
 from ..config import SimConfig
 from .contracts import ReactionOutcome
+from ..md_units import md_unit_factors
 
 if TYPE_CHECKING:
     from ..forcefield import FFBundle
@@ -27,19 +28,40 @@ class NVTStepper:
     from the same thermostat state and the same positions.
     """
 
-    def __init__(self, *, cfg: SimConfig, ff: FFBundle, shift_fn, masses, max_retries=12):
+    def __init__(
+        self, *,
+        cfg: SimConfig,
+        ff: FFBundle,
+        shift_fn,
+        masses,
+        md_energy_fn=None,
+        md_neighbor_fn=None,
+        max_retries=12,
+    ):
         self.cfg = cfg
         self.ff = ff
         self.shift_fn = shift_fn
         self.mass = jnp.asarray(masses)
         self.max_retries = int(max_retries)
+
+        if (md_energy_fn is None) != (md_neighbor_fn is None):
+            raise ValueError(
+                "md_energy_fn and md_neighbor_fn must be provided together"
+            )
+
+        self.md_energy_fn = md_energy_fn
+        self.md_neighbor_fn = md_neighbor_fn
+
         if self.max_retries < 0:
             raise ValueError('max_retries must be nonnegative')
         if not np.isfinite(cfg.dt) or cfg.dt <= 0 or cfg.check_every <= 0:
             raise ValueError('MD dt and check_every must be positive')
+
         self.set_forcefield(ff)
 
     def energy_scalar(self, positions, neighbor):
+        if self.md_energy_fn is not None:
+            return self.md_energy_fn(positions, neighbor)
         return self.ff.energy_fn(positions, neighbor)['total']
 
     def set_forcefield(self, ff: FFBundle):
@@ -47,14 +69,20 @@ class NVTStepper:
         cfg = self.cfg
         from jax_md import simulate
 
+        _, kb_md = md_unit_factors(cfg.md_unit_system)
         self.init_nvt, apply_nvt = simulate.nvt_nose_hoover(
             self.energy_scalar,
             self.shift_fn,
             dt=cfg.dt,
-            kT=cfg.kb_real * cfg.temperature_k,
+            kT=kb_md * cfg.temperature_k,
             tau=cfg.tau_T,
         )
-        neighbor_fn = ff.neighbor_fn
+        neighbor_fn = (
+            self.md_neighbor_fn
+            if self.md_neighbor_fn is not None
+            else ff.neighbor_fn
+        )
+        self.neighbor_fn = neighbor_fn
 
         @partial(jax.jit, static_argnames=('chunk',))
         def md_chunk(md_state, nlist, *, chunk):
@@ -76,7 +104,7 @@ class NVTStepper:
 
     def allocate_valid_nlist(self, positions, *, extra_capacity=0):
         for attempt in range(self.max_retries + 1):
-            nl = self.ff.neighbor_fn.allocate(
+            nl = self.neighbor_fn.allocate(
                 positions, extra_capacity=extra_capacity
             )
             if not bool(np.asarray(nl.did_buffer_overflow)):
@@ -85,8 +113,15 @@ class NVTStepper:
         raise RuntimeError('Neighbor-list allocation overflowed after capacity growth')
 
     def initialize(self, key, positions):
-        self.ff.nlist = self.allocate_valid_nlist(positions)
-        return self.init_nvt(key, positions,mass=self.mass ,neighbor=self.ff.nlist)
+        nlist = self.allocate_valid_nlist(positions)
+        self.nlist = nlist
+
+        if self.md_energy_fn is None:
+            self.ff.nlist = nlist
+
+        return self.init_nvt(
+            key, positions, mass=self.mass, neighbor=nlist
+        )
 
     def refresh_force(self, state, nlist):
         if not hasattr(state, 'force'):
@@ -122,20 +157,29 @@ class NVTStepper:
         raise AssertionError('Unreachable neighbor-list recovery state')
 
     def synchronize(self, state, outcome: ReactionOutcome, *, key=None):
-        """Commit a reaction and refresh the force under the new topology.
+        """Commit an accepted reaction and refresh the active MD forces.
 
-        Existing momenta and Nose-Hoover chain state are retained by default.
-        A paper A2 reaction with accepted Langevin relaxation explicitly
-        requests a thermostat reset and supplies relaxed velocities.
+        Preserve momenta and Nose-Hoover chain state unless the reaction
+        outcome explicitly requests otherwise. MACE-MD retains its MACE
+        energy/neighbor functions; classical MD rebuilds from the new topology.
         """
-        self.set_forcefield(outcome.ff)
+        if self.md_energy_fn is None:
+            # Classical MD: a topology change changes the force function.
+            self.set_forcefield(outcome.ff)
+        else:
+            # MACE-MD: keep the MACE integrator and its neighbor-list type.
+            # Retain the updated classical FF for subsequent reaction checks.
+            self.ff = outcome.ff
+
         nlist = self.allocate_valid_nlist(outcome.positions)
+
         if outcome.reinitialize_thermostat:
             if key is None:
                 raise ValueError('A PRNG key is required for thermostat reinitialization')
             state = self.init_nvt(key, outcome.positions, mass=self.mass, neighbor=nlist)
         else:
             state = replace(state, position=outcome.positions)
+
         # For topology-only handlers, preserve_momenta avoids a needless
         # velocity-to-momentum conversion. Paper A2 handlers supply the
         # relaxed velocities and explicitly request their handoff.
@@ -144,6 +188,13 @@ class NVTStepper:
                 state,
                 momentum=jnp.asarray(outcome.velocities) * self.mass[:, None],
             )
+
         state = self.refresh_force(state, nlist)
-        self.ff.nlist = nlist
+        self.nlist = nlist
+
+        if self.md_energy_fn is None:
+            # Never store a MACE neighbor list on the classical force field.
+            self.ff.nlist = nlist
+
         return state, nlist
+

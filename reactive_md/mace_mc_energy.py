@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
-
+import numpy as np
 
 class MaceJaxEnergyEvaluator:
     def __init__(self, *, neighbor_fn, make_energy_fn, box0):
@@ -27,4 +27,6 @@ class MaceJaxEnergyEvaluator:
 
         E = self._energy(R, nbrs)
         E.block_until_ready()
+
+        print("MACE energy evaluation completed.", flush=True)
         return float(E)
