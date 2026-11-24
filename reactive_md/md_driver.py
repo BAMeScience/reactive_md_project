@@ -108,6 +108,17 @@ def _rebuild_forcefield(md_state, system, options, energy_offset, box):
     )
 
 
+def _allocate_classical_reaction_list(ff, positions):
+    extra_capacity = 0
+    for _ in range(13):
+        neighbor = ff.neighbor_fn.allocate(positions, extra_capacity=extra_capacity)
+        if not bool(np.asarray(neighbor.did_buffer_overflow)):
+            ff.nlist = neighbor
+            return
+        extra_capacity = max(8, 2 * extra_capacity)
+    raise RuntimeError('Classical reaction neighbor-list allocation overflowed')
+
+
 def run_md_nvt(
     key,
     *,
@@ -126,6 +137,7 @@ def run_md_nvt(
     energy_offset: float | None = None,
     md_energy_fn=None,
     md_neighbor_fn=None,
+    md_backend_id: str | None = None,
 ) -> MDRunResult:
     """Generic NVT driver with optional checkpoint/restart.
 
@@ -134,6 +146,10 @@ def run_md_nvt(
     For continuous reaction timing, the checkpoint interval must be a multiple
     of ``cfg.check_every``. Observer classes must implement checkpoint_state()
     and restore_checkpoint_state(state) when checkpointing is enabled.
+
+    For checkpointed external MD backends, the caller must supply a stable
+    md_backend_id identifying the model, weights and neighbor configuration.
+    Executable backend objects are reconstructed by the caller, not serialized.
 
     The caller must construct the reaction handler (including its unreacted
     reference topology) from the original input before invoking this driver.
@@ -145,12 +161,11 @@ def run_md_nvt(
 
     mace_md = md_energy_fn is not None
 
-    if mace_md:
-        if checkpoint_path is not None or restart_path is not None:
-            raise NotImplementedError(
-                "Checkpoint/restart is not yet supported for MACE-MD"
-            )
-
+    if mace_md and (checkpoint_path is not None or restart_path is not None):
+        if not isinstance(md_backend_id, str) or not md_backend_id.strip():
+            raise ValueError("MACE-MD checkpoint/restart requires md_backend_id")
+    if not mace_md and md_backend_id is not None:
+        raise ValueError("md_backend_id requires an external MD backend")
 
     if cfg.steps < 0 or cfg.max_events < 0:
         raise ValueError('steps and max_events must be nonnegative')
@@ -183,6 +198,8 @@ def run_md_nvt(
         box = jnp.asarray(box, dtype=float_dtype)
 
     metadata = _restart_metadata(cfg, box, masses, float_dtype)
+    if mace_md:
+        metadata["md_backend_id"] = md_backend_id
     accepted_events = 0
     steps_done = 0
     relaxation_elapsed = 0.0
@@ -233,7 +250,14 @@ def run_md_nvt(
                     if mace_md else {}
                 ),
             )
-        md_nlist = ff.nlist
+        if mace_md:
+            # Rebuild both lists independently; retain the saved cached force
+            # and thermostat state rather than reinitializing the integrator.
+            _allocate_classical_reaction_list(ff, state.position)
+            md_nlist = stepper.allocate_valid_nlist(state.position)
+            stepper.nlist = md_nlist
+        else:
+            md_nlist = ff.nlist
         _restore_observers(observers, saved['observer_state'])
     else:
         stepper = NVTStepper(
@@ -304,19 +328,7 @@ def run_md_nvt(
             # Reaction code still uses the classical force-field object.
             # Its neighbor list must be valid at the current MACE-MD positions,
             # and must never be replaced by the MACE neighbor list.
-            extra_capacity = 0
-            for _ in range(13):
-                classical_nlist = ff.neighbor_fn.allocate(
-                    state.position, extra_capacity=extra_capacity
-                )
-                if not bool(np.asarray(classical_nlist.did_buffer_overflow)):
-                    ff.nlist = classical_nlist
-                    break
-                extra_capacity = max(8, 2 * extra_capacity)
-            else:
-                raise RuntimeError(
-                    'Classical reaction neighbor-list allocation overflowed'
-                )
+            _allocate_classical_reaction_list(ff, state.position)
         else:
             # Preserve the existing classical MD neighbor-list behavior.
             ff.nlist = md_nlist

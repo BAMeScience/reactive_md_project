@@ -236,6 +236,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
     mc_energy_evaluator = None
     md_energy_fn = None
     md_neighbor_fn = None
+    md_backend_id = None
     # Classical Metropolis is the default when MACE-MC is disabled.
     beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
    
@@ -264,10 +265,25 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             f"variant={cfg.mace_variant}"
         )
 
-        jax_model, jax_model_config, _torch_config = build_mace_model(
+        model_result = build_mace_model(
             source=cfg.mace_source,
             variant=cfg.mace_variant,
+            **({"return_backend_id": True} if checkpoint_enabled and cfg.use_mace_md else {}),
         )
+        jax_model, jax_model_config, _torch_config = model_result[:3]
+        if checkpoint_enabled and cfg.use_mace_md:
+            from ..mace_identity import fingerprint
+            md_backend_id = fingerprint(
+                model_result[3], z_atomic, cfg.mace_dr_threshold,
+                cfg.mace_capacity_multiplier, cfg.md_unit_system,
+                cfg.reaction_mode, cfg.use_mace_mc,
+                cfg.sigma_mid, cfg.sigma_width, cfg.reaction_rate_ps,
+                cfg.activation_energy_eV, cfg.prefactor_ps,
+                cfg.max_reactions_per_check, cfg.reverse_rate_ps,
+                cfg.allow_reverse_mc, cfg.relaxation_dt_ps,
+                cfg.relaxation_time_ps, cfg.relaxation_tau_ps,
+                cfg.r_cut, cfg.dr_threshold, cfg.p_type, cfg.f_type, cfg.li_type,
+            )
 
         (
             _mace_disp_fn,
@@ -422,6 +438,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             restart_path=restart_path,
             md_energy_fn=md_energy_fn,
             md_neighbor_fn=md_neighbor_fn,
+            **({"md_backend_id": md_backend_id} if md_backend_id is not None else {}),
         )
 
     return _result

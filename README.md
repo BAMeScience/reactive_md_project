@@ -166,7 +166,9 @@ python -m reactive_md.apps.lipf6 \
   --candidate-log-top-n 20
 ```
 
-Output availability and checkpoint/restart support can depend on the MD backend. In particular, MACE-MD output and restart workflows are not yet validated; do not rely on them for production runs without testing the current checkout.
+Checkpoint/restart is implemented for all five LiPF6 simulation modes, including MACE-MD. Use `--checkpoint-file state.pkl --checkpoint-every 1000` (the interval must be a positive multiple of `--check-every`). To continue, use `--restart-from state.pkl --steps TOTAL_STEPS` with the same original input files, model, simulation settings and output paths. The target step count includes the completed steps. Checkpointed output files must be uncompressed; output beyond the saved boundary is rolled back on restart. A terminal partial reaction interval cannot be extended. Load only trusted checkpoints (pickle format).
+
+MACE-MD checkpoints validate a backend fingerprint and reconstruct both neighbor lists. Regression tests use a differentiable surrogate rather than foundation-model weights. Verify restart equivalence with the actual MACE model and installed software stack before relying on this feature for production.
 
 Run the repository tests with:
 

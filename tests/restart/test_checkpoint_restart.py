@@ -94,15 +94,37 @@ def run(steps, *, react=False, **kwargs):
         **kwargs)
 
 
+class ExternalNeighbor(NamedTuple):
+    idx: object
+    did_buffer_overflow: object
+
+
+class ExternalNeighborFn(NeighborFn):
+    def allocate(self, positions, *, extra_capacity=0):
+        return ExternalNeighbor(*super().allocate(positions, extra_capacity=extra_capacity))
+
+
+def external_backend(identity='surrogate-v1'):
+    def energy(positions, neighbor):
+        assert isinstance(neighbor, ExternalNeighbor)
+        return 1.5 * jnp.sum(positions ** 2)
+    return dict(md_energy_fn=energy, md_neighbor_fn=ExternalNeighborFn(),
+                md_backend_id=identity)
+
+
+@pytest.mark.parametrize('external', [False, True])
 @pytest.mark.parametrize('react', [False, True])
-def test_aligned_restart_matches_uninterrupted(tmp_path, monkeypatch, react):
+def test_aligned_restart_matches_uninterrupted(tmp_path, monkeypatch, react, external):
     path = tmp_path / 'state.pkl'
     full_obs, first_obs, resumed_obs = Recorder(), Recorder(), Recorder()
-    full = run(6, react=react, observers=(full_obs,))
+    backend = external_backend if external else dict
+    full = run(6, react=react, observers=(full_obs,), **backend())
     first = run(2, react=react, observers=(first_obs,), checkpoint_path=path,
-                checkpoint_every_steps=2)
+                checkpoint_every_steps=2, **backend())
     saved = checkpoint.load_checkpoint(path)
     assert saved['steps_done'] == 2
+    if external:
+        assert saved['metadata']['md_backend_id'] == 'surrogate-v1'
     assert saved['accepted_events'] == int(react)
     assert saved['observer_state']['0']['steps'] == [0, 2]
     np.testing.assert_array_equal(saved['key'], first.key)
@@ -120,7 +142,8 @@ def test_aligned_restart_matches_uninterrupted(tmp_path, monkeypatch, react):
     def forbidden_initialize(*args, **kwargs):
         pytest.fail('Restart must not reinitialize the thermostat')
     monkeypatch.setattr(md_driver.NVTStepper, 'initialize', forbidden_initialize)
-    resumed = run(6, react=react, observers=(resumed_obs,), restart_path=path)
+    resumed = run(6, react=react, observers=(resumed_obs,), restart_path=path, **backend())
+    assert isinstance(resumed.ff.nlist, Neighbor)
     assert len(rebuilt) == 1
     assert resumed.steps_done == full.steps_done == 6
     assert resumed.accepted_events == full.accepted_events == int(react)
@@ -150,10 +173,25 @@ def test_restart_metadata_rejects_changes(field, value):
 
 
 @pytest.mark.parametrize('argument', ['checkpoint_path', 'restart_path'])
-def test_mace_md_checkpoint_unsupported(tmp_path, argument):
-    with pytest.raises(NotImplementedError, match='not yet supported for MACE-MD'):
+def test_external_checkpoint_requires_identity(tmp_path, argument):
+    with pytest.raises(ValueError, match='requires md_backend_id'):
         run(2, md_energy_fn=lambda R, neighbor: jnp.sum(R**2),
             md_neighbor_fn=NeighborFn(), **{argument: tmp_path / 'state.pkl'})
+
+
+@pytest.mark.parametrize('replacement', ['changed', 'classical', 'external'])
+def test_restart_rejects_backend_change(tmp_path, monkeypatch, replacement):
+    path = tmp_path / 'state.pkl'
+    initial = {} if replacement == 'external' else external_backend()
+    run(2, checkpoint_path=path, **initial)
+    original = path.read_bytes()
+    def forbidden(*args, **kwargs):
+        pytest.fail('Backend mismatch must fail before force-field reconstruction')
+    monkeypatch.setattr(md_driver, '_rebuild_forcefield', forbidden)
+    resumed = {} if replacement == 'classical' else external_backend('surrogate-v2')
+    with pytest.raises(ValueError, match='Checkpoint.*(metadata|md_backend_id)'):
+        run(4, restart_path=path, checkpoint_path=path, **resumed)
+    assert path.read_bytes() == original
 
 
 @pytest.mark.parametrize('interval', [0, -2, 3])

@@ -23,15 +23,28 @@ def load_foundation_model(source="mp", variant=None, device="cpu"):
     return loader(return_raw_model=True, **loader_kwargs).float().eval()
 
 
-def build_mace_model(source="mp", variant="small-0b2"):
+def build_mace_model(source="mp", variant="small-0b2", *, return_backend_id=False):
     torch_device = configure_torch_runtime(get_torch_device(), deterministic=True)
 
     torch_model = load_foundation_model(source, variant, device="cpu")
     torch_config = extract_config_mace_model(torch_model)
+
+    if return_backend_id:
+        from .mace_identity import fingerprint
+        from importlib.metadata import version
+        versions = {name: version(name) for name in
+                    ("mace-torch", "mace-jax", "jax", "jax-md", "flax", "torch")}
+        model_id = fingerprint(source.lower(), variant, versions,
+                               type(torch_model), repr(torch_model), torch_config,
+                               torch_model.state_dict())
 
     torch_model = torch_model.to(torch_device)
 
     graphdef, nnx_state, jax_config = convert_model(torch_model, torch_config)
     jax_model = nnx.merge(graphdef, nnx_state)
 
+    if return_backend_id:
+        # Include the converted parameters and configuration, not only source weights.
+        model_id = fingerprint(model_id, jax_config, nnx.state(jax_model).to_pure_dict())
+        return jax_model, jax_config, torch_config, model_id
     return jax_model, jax_config, torch_config

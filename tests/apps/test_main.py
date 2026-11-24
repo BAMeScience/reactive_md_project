@@ -217,3 +217,51 @@ def test_unsupported_application_modes_fail_before_io(monkeypatch, mode, mc, md,
     monkeypatch.setattr(lipf6_app, 'parse_lammps_data', forbidden)
     with pytest.raises(ValueError, match=message):
         lipf6_app.main(SimConfig(reaction_mode=mode, use_mace_mc=mc, use_mace_md=md))
+
+
+@pytest.mark.parametrize('mode', ['metropolis', 'rate'])
+def test_mace_checkpoint_identity_forwarded_to_generic_driver(
+    monkeypatch, mocked_parser, tmp_path, mode
+):
+    from dataclasses import replace
+    from reactive_md.engine.contracts import MDRunResult
+    from reactive_md.reactions import lipf6_driver
+
+    setup = types.ModuleType('reactive_md.mace_setup')
+    energy = types.ModuleType('reactive_md.mace_energy')
+    model_id = ['weights-a']
+    calls = []
+
+    def build(**kwargs):
+        assert kwargs['return_backend_id'] is True
+        return None, None, None, model_id[0]
+
+    setup.build_mace_model = build
+    energy.build_mace_energy_system = lambda **kw: (
+        None, None, object(), lambda nl: lambda R, **kw: jnp.asarray(2.0)
+    )
+    monkeypatch.setitem(sys.modules, setup.__name__, setup)
+    monkeypatch.setitem(sys.modules, energy.__name__, energy)
+
+    def driver(key, **kwargs):
+        calls.append(kwargs)
+        return MDRunResult(None, kwargs['ff'], kwargs['sys'], 0, 0, key, 0.)
+
+    monkeypatch.setattr(lipf6_driver, 'run_md_nvt', driver)
+    cfg = SimConfig(reaction_mode=mode, use_mace_md=True,
+                    use_mace_mc=(mode == 'metropolis'),
+                    reaction_rate_ps=1. if mode == 'rate' else None)
+    path = str(tmp_path / 'checkpoint')
+    lipf6_app.main(cfg, checkpoint_path=path)
+    original = calls[-1]['md_backend_id']
+    assert original.startswith('mace-v1:')
+    assert calls[-1]['checkpoint_path'] == path
+    (tmp_path / 'checkpoint').touch()
+    lipf6_app.main(replace(cfg, steps=cfg.steps + 100), restart_path=path)
+    assert calls[-1]['md_backend_id'] == original
+    assert calls[-1]['restart_path'] == path
+    lipf6_app.main(replace(cfg, mace_dr_threshold=.9), checkpoint_path=path)
+    assert calls[-1]['md_backend_id'] != original
+    model_id[0] = 'weights-b'
+    lipf6_app.main(cfg, checkpoint_path=path)
+    assert calls[-1]['md_backend_id'] != original

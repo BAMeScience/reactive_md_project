@@ -37,6 +37,7 @@ def run_md_nvt_with_reactions(
     md_energy_fn=None,
     md_neighbor_fn=None,
     passes_interval_ps=False,
+    md_backend_id: str | None = None,
 ):
     """Maintain the legacy LiPF6 public signature and return type.
 
@@ -64,6 +65,7 @@ def run_md_nvt_with_reactions(
         **({"restart_path": restart_path} if restart_path is not None else {}),
         **({"md_energy_fn": md_energy_fn} if md_energy_fn is not None else {}),
         **({"md_neighbor_fn": md_neighbor_fn} if md_neighbor_fn is not None else {}),
+        **({"md_backend_id": md_backend_id} if md_backend_id is not None else {}),
     )
     print('Done.')
     print(f'Total accepted events: {result.accepted_events}')

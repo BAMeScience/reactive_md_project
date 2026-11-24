@@ -152,3 +152,25 @@ def test_model_conversion_contract(setup_module, monkeypatch):
     raw.to.assert_called_once_with("configured-device")
     convert.assert_called_once_with(moved, torch_config)
     merge.assert_called_once_with(graph, state)
+
+
+def test_checkpoint_model_identity_includes_converted_weights(setup_module, monkeypatch):
+    mod = setup_module
+    raw = Mock()
+    raw.state_dict.return_value = {'w': np.array([1.], dtype=np.float32)}
+    raw.to.return_value = raw
+    # Mock repr includes an address, but this string is constant within this test.
+    weights = {'w': np.array([2.], dtype=np.float32)}
+    state = SimpleNamespace(to_pure_dict=lambda: weights)
+    monkeypatch.setattr(mod, 'get_torch_device', lambda: 'cpu')
+    monkeypatch.setattr(mod, 'configure_torch_runtime', lambda *a, **kw: 'cpu')
+    monkeypatch.setattr(mod, 'load_foundation_model', lambda *a, **kw: raw)
+    monkeypatch.setattr(mod, 'extract_config_mace_model', lambda m: {'r_max': 5.})
+    monkeypatch.setattr(mod, 'convert_model', lambda *a: (None, None, {'r_max': 5.}))
+    monkeypatch.setattr(mod, 'nnx', SimpleNamespace(merge=lambda *a: None,
+                                                   state=lambda m: state))
+    monkeypatch.setattr('importlib.metadata.version', lambda name: 'test-version')
+    first = mod.build_mace_model(return_backend_id=True)[3]
+    assert mod.build_mace_model(return_backend_id=True)[3] == first
+    weights['w'][0] = 3.
+    assert mod.build_mace_model(return_backend_id=True)[3] != first
