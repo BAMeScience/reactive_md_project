@@ -24,7 +24,7 @@ import numpy as np
 from reactive_md.reaction import SystemState, build_trial_forcefield
 from reactive_md.relaxation import langevin_relax_with_nlist
 from reactive_md.reactions.a2 import A2Reaction
-from reactive_md.reactions.a2_energy import local_solvation_energy
+from reactive_md.reactions.a2_energy import local_solvation_energy, spectator_forcefield
 from reactive_md.reactions.a2_rate import (
     make_a2_system_state_from_trial,
     translate_reacting_pair,
@@ -160,9 +160,16 @@ def a2_metropolis_reactive_cycle(
     # Read the unmodified reactant energy *before* constructing/relaxing the
     # product. No pre-reaction state object or neighbor list is overwritten.
     pair = (i, j)
-    u_before = (_potential(ff, R, _valid_nlist(ff, R))
-                if energy_mode == "full" else
-                local_solvation_energy(ff, R, system, pair, box))
+    # u_before = (_potential(ff, R, _valid_nlist(ff, R))
+    #             if energy_mode == "full" else
+    #             local_solvation_energy(ff, R, system, pair, box))
+    # faster: build the spectator force field once and use it for both the before and after energy.
+    spectator = None
+    if energy_mode == "full":
+        u_before = _potential(ff, R, _valid_nlist(ff, R))
+    else:
+        spectator = spectator_forcefield(ff, R, system, pair, box)
+        u_before = local_solvation_energy(ff, R, system, pair, box, spectator=spectator)
     R_trial = translate_reacting_pair(
         R, i, j, disp_fn=disp_fn, shift_fn=shift_fn,
         displacement_per_atom=(reaction.association_displacement if kind == "association"
@@ -183,9 +190,13 @@ def a2_metropolis_reactive_cycle(
     if bool(np.asarray(nl_relaxed.did_buffer_overflow)):
         raise RuntimeError("MC trial relaxation returned an overflowing neighbor list")
 
+    # u_after = (_potential(trial_ff, R_relaxed, nl_relaxed)
+    #            if energy_mode == "full" else
+    #            local_solvation_energy(trial_ff, R_relaxed, trial_system, pair, box))
     u_after = (_potential(trial_ff, R_relaxed, nl_relaxed)
                if energy_mode == "full" else
-               local_solvation_energy(trial_ff, R_relaxed, trial_system, pair, box))
+               local_solvation_energy(trial_ff, R_relaxed, trial_system, pair, box,
+                                      spectator=spectator))
     delta_u = u_after - u_before
     probability = _metropolis_probability(delta_u, kT)
     accepted = bool(rng.random() < probability)

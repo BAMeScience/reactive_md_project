@@ -153,30 +153,34 @@ class A2Reaction:
             dtype=np.int32,
         )
 
-        a_set = {
-            int(i)
-            for i in self.a_indices
-        }
+        # a_set = {
+        #     int(i)
+        #     for i in self.a_indices
+        # }
+        #
+        # # -----------------------------------------------------
+        # # Determine which A atoms are already part of dimers.
+        # # -----------------------------------------------------
+        #
+        # bonded_a = set()
+        #
+        # for i, j in bond_idx:
+        #     i = int(i)
+        #     j = int(j)
+        #
+        #     if i in a_set and j in a_set:
+        #         bonded_a.add(i)
+        #         bonded_a.add(j)
+        #
+        # free_a = [
+        #     int(i)
+        #     for i in self.a_indices
+        #     if int(i) not in bonded_a
+        # ]
 
-        # -----------------------------------------------------
-        # Determine which A atoms are already part of dimers.
-        # -----------------------------------------------------
-
-        bonded_a = set()
-
-        for i, j in bond_idx:
-            i = int(i)
-            j = int(j)
-
-            if i in a_set and j in a_set:
-                bonded_a.add(i)
-                bonded_a.add(j)
-
-        free_a = [
-            int(i)
-            for i in self.a_indices
-            if int(i) not in bonded_a
-        ]
+        # faster: find bonded A atoms with one numpy mask instead of looping over bonds.
+        bonded_a = self._bonded_a_atoms(bond_idx)
+        free_a = self.a_indices[~np.isin(self.a_indices, bonded_a)]
 
         # -----------------------------------------------------
         # Search unique free A-A pairs.
@@ -234,42 +238,70 @@ class A2Reaction:
             dtype=np.int32,
         )
 
-        a_set = {
-            int(i)
-            for i in self.a_indices
-        }
+        # a_set = {
+        #     int(i)
+        #     for i in self.a_indices
+        # }
 
-        candidates = []
+        # candidates = []
+        #
+        # for bond_index, pair in enumerate(bond_idx):
+        #     i = int(pair[0])
+        #     j = int(pair[1])
+        #
+        #     # Ignore bonds that are not A-A bonds.
+        #     if i not in a_set or j not in a_set:
+        #         continue
+        #
+        #     dr = disp_fn(
+        #         R_np[i],
+        #         R_np[j],
+        #     )
+        #
+        #     distance = float(
+        #         np.linalg.norm(
+        #             np.asarray(dr)
+        #         )
+        #     )
+        #
+        #     candidates.append(
+        #         A2DissociationCandidate(
+        #             i=i,
+        #             j=j,
+        #             bond_index=bond_index,
+        #             distance=distance,
+        #         )
+        #     )
+        #
+        # return candidates
 
-        for bond_index, pair in enumerate(bond_idx):
-            i = int(pair[0])
-            j = int(pair[1])
+        # faster: pick the A-A bonds with a mask and get all their lengths in one batched call.
+        bond_idx = bond_idx.reshape(-1, 2)
+        aa_bonds = np.flatnonzero(np.isin(bond_idx, self.a_indices).all(axis=1))
+        if aa_bonds.size == 0:
+            return []
 
-            # Ignore bonds that are not A-A bonds.
-            if i not in a_set or j not in a_set:
-                continue
+        if disp_fn is not self._association_disp_fn:
+            self._association_batched_disp = jax.jit(jax.vmap(disp_fn))
+            self._association_disp_fn = disp_fn
 
-            dr = disp_fn(
-                R_np[i],
-                R_np[j],
+        positions = jnp.asarray(R_np)
+        pair_i = bond_idx[aa_bonds, 0]
+        pair_j = bond_idx[aa_bonds, 1]
+        distances = np.linalg.norm(
+            np.asarray(self._association_batched_disp(positions[pair_i], positions[pair_j])),
+            axis=1,
+        )
+
+        return [
+            A2DissociationCandidate(
+                i=int(pair_i[k]),
+                j=int(pair_j[k]),
+                bond_index=int(aa_bonds[k]),
+                distance=float(distances[k]),
             )
-
-            distance = float(
-                np.linalg.norm(
-                    np.asarray(dr)
-                )
-            )
-
-            candidates.append(
-                A2DissociationCandidate(
-                    i=i,
-                    j=j,
-                    bond_index=bond_index,
-                    distance=distance,
-                )
-            )
-
-        return candidates
+            for k in range(aa_bonds.size)
+        ]
 
     def build_association_trial(
         self,
@@ -347,15 +379,18 @@ class A2Reaction:
         # Each A atom may belong to at most one A2 dimer.
         # -----------------------------------------------------
 
-        bonded_a = set()
+        # bonded_a = set()
+        #
+        # for atom_i, atom_j in bond_idx:
+        #     atom_i = int(atom_i)
+        #     atom_j = int(atom_j)
+        #
+        #     if atom_i in a_set and atom_j in a_set:
+        #         bonded_a.add(atom_i)
+        #         bonded_a.add(atom_j)
 
-        for atom_i, atom_j in bond_idx:
-            atom_i = int(atom_i)
-            atom_j = int(atom_j)
-
-            if atom_i in a_set and atom_j in a_set:
-                bonded_a.add(atom_i)
-                bonded_a.add(atom_j)
+        # faster: same check as above, done with a numpy mask.
+        bonded_a = self._bonded_a_atoms(bond_idx)
 
         if i in bonded_a or j in bonded_a:
             raise ValueError(
@@ -484,6 +519,12 @@ class A2Reaction:
                 bond_r0[keep],
             ),
         )
+
+    def _bonded_a_atoms(self, bond_idx) -> np.ndarray:
+        """Return the A atoms that already sit in an A-A bond."""
+        bond_idx = np.asarray(bond_idx, dtype=np.int32).reshape(-1, 2)
+        aa = np.isin(bond_idx, self.a_indices).all(axis=1)
+        return np.unique(bond_idx[aa])
 
     @staticmethod
     def _copy_system_with_bonds(

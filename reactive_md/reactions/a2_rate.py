@@ -48,23 +48,39 @@ def translate_reacting_pair(
             .at[j].set(shift_fn(R[j], +sign * delta * u))
         )
 
+    # R_plus = shifted(+1.0)
+    # R_minus = shifted(-1.0)
+    # r_plus = float(jnp.linalg.norm(disp_fn(R_plus[i], R_plus[j])))
+    # r_minus = float(jnp.linalg.norm(disp_fn(R_minus[i], R_minus[j])))
+    #
+    # if move_apart:
+    #     R_new = R_plus if r_plus >= r_minus else R_minus
+    #     r_after = max(r_plus, r_minus)
+    #     if r_after <= r_before:
+    #         raise ValueError("Pair translation did not increase separation.")
+    # else:
+    #     R_new = R_plus if r_plus <= r_minus else R_minus
+    #     r_after = min(r_plus, r_minus)
+    #     if r_after >= r_before:
+    #         raise ValueError("Pair translation did not decrease separation.")
+    #
+    # return R_new
+
+    # faster: try one sign first and only build the other one if it went the wrong way.
     R_plus = shifted(+1.0)
-    R_minus = shifted(-1.0)
     r_plus = float(jnp.linalg.norm(disp_fn(R_plus[i], R_plus[j])))
+    if (r_plus > r_before) if move_apart else (r_plus < r_before):
+        return R_plus
+
+    R_minus = shifted(-1.0)
     r_minus = float(jnp.linalg.norm(disp_fn(R_minus[i], R_minus[j])))
-
     if move_apart:
-        R_new = R_plus if r_plus >= r_minus else R_minus
-        r_after = max(r_plus, r_minus)
-        if r_after <= r_before:
+        if max(r_plus, r_minus) <= r_before:
             raise ValueError("Pair translation did not increase separation.")
-    else:
-        R_new = R_plus if r_plus <= r_minus else R_minus
-        r_after = min(r_plus, r_minus)
-        if r_after >= r_before:
-            raise ValueError("Pair translation did not decrease separation.")
-
-    return R_new
+        return R_plus if r_plus >= r_minus else R_minus
+    if min(r_plus, r_minus) >= r_before:
+        raise ValueError("Pair translation did not decrease separation.")
+    return R_plus if r_plus <= r_minus else R_minus
 
 
 @dataclass(frozen=True)
@@ -249,10 +265,13 @@ def a2_rate_reactive_cycle(
     bond_k = np.asarray(system.bonds[1])
     bond_r0 = np.asarray(system.bonds[2])
     remove_indices = {int(c.bond_index) for c in accepted_dissociations}
-    keep = np.array(
-        [index not in remove_indices for index in range(bond_idx.shape[0])],
-        dtype=bool,
-    )
+    # keep = np.array(
+    #     [index not in remove_indices for index in range(bond_idx.shape[0])],
+    #     dtype=bool,
+    # )
+    # faster: build the keep mask with numpy instead of a Python list.
+    keep = np.ones(bond_idx.shape[0], dtype=bool)
+    keep[list(remove_indices)] = False
     new_bond_idx = bond_idx[keep]
     new_bond_k = bond_k[keep]
     new_bond_r0 = bond_r0[keep]
@@ -281,8 +300,11 @@ def a2_rate_reactive_cycle(
     # In the A/A2 benchmark each unbonded atom is a separate molecule;
     # every A2 bond joins precisely two atoms.
     new_molecule_id = np.arange(len(system.molecule_id), dtype=np.int32)
-    for i, j in new_bond_idx:
-        new_molecule_id[int(j)] = new_molecule_id[int(i)]
+    # for i, j in new_bond_idx:
+    #     new_molecule_id[int(j)] = new_molecule_id[int(i)]
+    # faster: every atom is in at most one A2 bond, so this can be done in one numpy assignment.
+    pairs = new_bond_idx.reshape(-1, 2)
+    new_molecule_id[pairs[:, 1]] = new_molecule_id[pairs[:, 0]]
 
     trial = {
         "bonds": (new_bond_idx, new_bond_k, new_bond_r0),

@@ -222,6 +222,9 @@ def run_md_nvt(
             metadata=metadata,
         )
 
+    # faster: kB does not change during the run, so get it once before the loop.
+    _, kb_md = md_unit_factors(cfg.md_unit_system)
+
     if restart_path is None:
         notify()
     # On restart, the saved step has already been emitted. Do not duplicate it.
@@ -249,7 +252,7 @@ def run_md_nvt(
             if before_callback is not None:
                 before_callback(before_observation)
 
-        _, kb_md = md_unit_factors(cfg.md_unit_system),        
+        # _, kb_md = md_unit_factors(cfg.md_unit_system),
         outcome = reaction_handler.attempt(ReactionContext(
             key=key,
             step=steps_done,

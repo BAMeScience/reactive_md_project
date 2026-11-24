@@ -48,7 +48,9 @@ class NVTStepper:
         cfg = self.cfg
         from jax_md import simulate
 
-        _, kb_md = md_unit_factors(cfg.md_unit_system),
+        # _, kb_md = md_unit_factors(cfg.md_unit_system),
+        # fix: the trailing comma made a 1-tuple, so unpacking into two names crashed.
+        _, kb_md = md_unit_factors(cfg.md_unit_system)
         self.init_nvt, apply_nvt = simulate.nvt_nose_hoover(
             self.energy_scalar,
             self.shift_fn,

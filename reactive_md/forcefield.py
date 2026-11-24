@@ -20,6 +20,23 @@ class FFBundle:
     coulomb_handler: object
     nb_options: NonbondedOptions
 
+
+# faster: only allocate the neighbor list when someone reads ff.nlist, since
+# reaction trials overwrite it with the relaxed list and never use the first one.
+class _LazyNlistFFBundle(FFBundle):
+    @property
+    def nlist(self):
+        if self._nlist is None and self._nlist_positions is not None:
+            self._nlist = self.neighbor_fn.allocate(self._nlist_positions)
+            self._nlist_positions = None
+        return self._nlist
+
+    @nlist.setter
+    def nlist(self, value):
+        self._nlist = value
+        self._nlist_positions = None
+
+
 def build_forcefield(
     R,
     box,
@@ -98,16 +115,30 @@ def build_forcefield(
               "offset": offset,
               "total": energies["total"] + offset,
            }
-    nlist = neighbor_fn.allocate(R)
+    # nlist = neighbor_fn.allocate(R)
+    #
+    # return FFBundle(
+    #     topo=topo,
+    #     params=params,
+    #     energy_fn=energy_fn,
+    #     neighbor_fn=neighbor_fn,
+    #     disp_fn=disp_fn,
+    #     nlist=nlist,
+    #     coulomb_handler=coulomb_handler,
+    #     nb_options=nb_options,
+    # )
 
-    return FFBundle(
+    # faster: same bundle, but the neighbor list is built on first use (see _LazyNlistFFBundle).
+    ff = _LazyNlistFFBundle(
         topo=topo,
         params=params,
         energy_fn=energy_fn,
         neighbor_fn=neighbor_fn,
         disp_fn=disp_fn,
-        nlist=nlist,
+        nlist=None,
         coulomb_handler=coulomb_handler,
         nb_options=nb_options,
     )
+    ff._nlist_positions = R
+    return ff
 

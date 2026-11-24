@@ -68,9 +68,11 @@ class A2MDRunResult:
 
 
 def _count_a2(system: SystemState, reaction: A2Reaction) -> int:
-    a_atoms = set(int(i) for i in np.asarray(reaction.a_indices))
+    # a_atoms = set(int(i) for i in np.asarray(reaction.a_indices))
     bonds = np.asarray(system.bonds[0]).reshape(-1, 2)
-    return sum(int(i) in a_atoms and int(j) in a_atoms for i, j in bonds)
+    # return sum(int(i) in a_atoms and int(j) in a_atoms for i, j in bonds)
+    # faster: count A-A bonds with a numpy mask instead of a Python loop.
+    return int(np.isin(bonds, reaction.a_indices).all(axis=1).sum())
 
 
 class A2OutputObserver:

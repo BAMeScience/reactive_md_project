@@ -377,14 +377,15 @@ def maybe_react_one_event(
             disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
         )
 
-    d_lif_after_probe = float(
-          jnp.linalg.norm(
-              ff_trial.disp_fn(
-              R_probe[cand.li_idx],
-              R_probe[cand.leave_F],
-           )
-          )
-    )
+    # faster: removed, this distance was never used but still forced a device sync.
+    # d_lif_after_probe = float(
+    #       jnp.linalg.norm(
+    #           ff_trial.disp_fn(
+    #           R_probe[cand.li_idx],
+    #           R_probe[cand.leave_F],
+    #        )
+    #       )
+    # )
 
     key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
         key, R_probe,
@@ -662,12 +663,14 @@ def maybe_react_rate_events(
         if trial is None:
             continue
 
-        ff_trial = build_trial_forcefield(
-            R,
-            box,
-            trial,
-            ff_current,
-        )
+        # ff_trial = build_trial_forcefield(
+        #     R,
+        #     box,
+        #     trial,
+        #     ff_current,
+        # )
+        # faster: only the last trial's force field is used, so build it once after the loop.
+        last_trial = trial
 
         pf6_reacted_np[cand.k_pf6] = cand.direction == "forward"
         used_li.add(cand.li_idx)
@@ -682,7 +685,7 @@ def maybe_react_rate_events(
             trial, pf6_reacted_np, leave_f, li_partner,
         )
 
-        ff_current = ff_trial
+        # ff_current = ff_trial
 
         # -----------------------------------------------------
         # Event logging.
@@ -738,6 +741,9 @@ def maybe_react_rate_events(
             "dt_reactive_ps": reactive_interval_ps,
             "candidate_records": candidate_records,
         }, R
+
+    # faster: one force-field build for all accepted events (was one per event inside the loop).
+    ff_current = build_trial_forcefield(R, box, last_trial, ff)
 
     # ---------------------------------------------------------
     # Apply the probe placements for all accepted candidates.

@@ -244,7 +244,9 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
     )
 
     # One force-field update per accepted topology change.
-    assert len(built_forcefields) == 2
+    # assert len(built_forcefields) == 2
+    # The force field is now built once from the final topology of the batch.
+    assert len(built_forcefields) == 1
 
     # The complete batch must be relaxed exactly once.
     assert len(relax_calls) == 1

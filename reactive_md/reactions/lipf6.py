@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -576,53 +577,95 @@ def find_reaction_candidates(
         )
 
     Rj = jnp.asarray(R)
-    candidates: list[ReactionCandidate] = []
+    # candidates: list[ReactionCandidate] = []
+    #
+    # for k_pf6 in range(pf6_atoms_np.shape[0]):
+    #     if pf6_reacted_np[k_pf6]:
+    #         continue
+    #
+    #     phosphorus = int(pf6_atoms_np[k_pf6, 0])
+    #     fluorines = pf6_atoms_np[k_pf6, 1:]
+    #
+    #     for li_atom in li_atoms_np:
+    #         li_idx = int(li_atom)
+    #
+    #         for fluorine in fluorines:
+    #             fluorine_idx = int(fluorine)
+    #
+    #             d_lif = _distance(
+    #                 disp_fn,
+    #                 Rj,
+    #                 li_idx,
+    #                 fluorine_idx,
+    #             )
+    #             d_pf = _distance(
+    #                 disp_fn,
+    #                 Rj,
+    #                 phosphorus,
+    #                 fluorine_idx,
+    #             )
+    #
+    #             candidates.append(
+    #                 ReactionCandidate(
+    #                     k_pf6=int(k_pf6),
+    #                     li_idx=li_idx,
+    #                     leave_F=fluorine_idx,
+    #                     d_lif=d_lif,
+    #                     d_pf=d_pf,
+    #                 )
+    #             )
+    #
+    # candidates.sort(
+    #     key=lambda candidate: reaction_coordinate(
+    #         d_pf=candidate.d_pf,
+    #         d_lif=candidate.d_lif,
+    #     ),
+    #     reverse=True,
+    # )
+    #
+    # return candidates
 
-    for k_pf6 in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k_pf6]:
-            continue
+    # faster: get all P-F and Li-F distances in two batched calls instead of two calls per pair.
+    k_open = np.flatnonzero(~pf6_reacted_np)
+    if k_open.size == 0 or li_atoms_np.size == 0:
+        return []
 
-        phosphorus = int(pf6_atoms_np[k_pf6, 0])
-        fluorines = pf6_atoms_np[k_pf6, 1:]
+    rows = pf6_atoms_np[k_open]
+    p_idx = rows[:, 0]
+    f_idx = rows[:, 1:]
 
-        for li_atom in li_atoms_np:
-            li_idx = int(li_atom)
+    pf_disp = jax.vmap(jax.vmap(disp_fn, (None, 0)))
+    d_pf = np.linalg.norm(
+        np.asarray(pf_disp(Rj[p_idx], Rj[f_idx])),
+        axis=-1,
+    ).astype(np.float64)  # (n_open, 6)
+    lif_disp = jax.vmap(jax.vmap(disp_fn, (None, 0)), (0, None))
+    d_lif = np.linalg.norm(
+        np.asarray(lif_disp(Rj[li_atoms_np], Rj[f_idx.reshape(-1)])),
+        axis=-1,
+    ).astype(np.float64).reshape(li_atoms_np.size, len(k_open), 6).transpose(1, 0, 2)  # (n_open, n_li, 6)
 
-            for fluorine in fluorines:
-                fluorine_idx = int(fluorine)
+    # Same (PF6, Li, F) order as the old loops, so the stable sort breaks ties the same way.
+    d_pf = np.broadcast_to(d_pf[:, None, :], d_lif.shape)
+    sigma = (d_pf - d_lif).reshape(-1)
+    order = np.argsort(-sigma, kind="stable")
 
-                d_lif = _distance(
-                    disp_fn,
-                    Rj,
-                    li_idx,
-                    fluorine_idx,
-                )
-                d_pf = _distance(
-                    disp_fn,
-                    Rj,
-                    phosphorus,
-                    fluorine_idx,
-                )
+    k_flat = np.broadcast_to(k_open[:, None, None], d_lif.shape).reshape(-1)
+    li_flat = np.broadcast_to(li_atoms_np[None, :, None], d_lif.shape).reshape(-1)
+    f_flat = np.broadcast_to(f_idx[:, None, :], d_lif.shape).reshape(-1)
+    d_lif_flat = d_lif.reshape(-1)
+    d_pf_flat = d_pf.reshape(-1)
 
-                candidates.append(
-                    ReactionCandidate(
-                        k_pf6=int(k_pf6),
-                        li_idx=li_idx,
-                        leave_F=fluorine_idx,
-                        d_lif=d_lif,
-                        d_pf=d_pf,
-                    )
-                )
-
-    candidates.sort(
-        key=lambda candidate: reaction_coordinate(
-            d_pf=candidate.d_pf,
-            d_lif=candidate.d_lif,
-        ),
-        reverse=True,
-    )
-
-    return candidates
+    return [
+        ReactionCandidate(
+            k_pf6=int(k_flat[n]),
+            li_idx=int(li_flat[n]),
+            leave_F=int(f_flat[n]),
+            d_lif=float(d_lif_flat[n]),
+            d_pf=float(d_pf_flat[n]),
+        )
+        for n in order
+    ]
 
 
 def prepare_probe_geometry(
