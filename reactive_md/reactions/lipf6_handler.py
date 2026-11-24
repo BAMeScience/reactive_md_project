@@ -11,18 +11,20 @@ from ..md_driver import ReactionContext, ReactionOutcome
 class LiPF6Handler:
     """Wrap an existing ``reaction_step_fn(key, R, ff, system)`` callback.
 
-    The callback is deliberately kept unchanged to preserve the established
-    LiPF6 candidate selection, rate probabilities and logging metadata.
+    Legacy callbacks retain their positional signature. Callbacks opting in
+    to passes_interval_ps receive the actual MD chunk duration as a keyword.
     """
 
     reaction_step_fn: Callable
     passes_velocities: bool = False
+    passes_interval_ps: bool = False
 
     def attempt(self, context: ReactionContext) -> ReactionOutcome:
         args = (context.key, context.positions, context.ff, context.system)
         if self.passes_velocities:
             args += (context.velocities,)
-        key, accepted, ff, system, info, positions = self.reaction_step_fn(*args)
+        kwargs = {"interval_ps": context.interval_ps} if self.passes_interval_ps else {}
+        key, accepted, ff, system, info, positions = self.reaction_step_fn(*args, **kwargs)
         info = dict(info)
         relaxed_velocities = info.pop("_relaxed_velocities", context.velocities)
         relaxation_time_ps = float(info.pop("relaxation_time_ps", 0.0)) if accepted else 0.0

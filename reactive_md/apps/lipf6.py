@@ -119,7 +119,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
         print(
             f"Rate parameters: "
             f"k={cfg.reaction_rate_ps} ps^-1, "
-            f"dt_reactive={cfg.check_every * cfg.dt:.4f} ps, "
+            f"nominal_dt_reactive={cfg.check_every * cfg.dt:.4f} ps, "
             f"max_reactions_per_check={cfg.max_reactions_per_check}"
         )
 
@@ -311,7 +311,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
            print("Metropolis energy: classical force field")
            beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
 
-    def reaction_step_fn(key, R, ff_in, sys_in, velocities):
+    def reaction_step_fn(key, R, ff_in, sys_in, velocities, *, interval_ps):
         if cfg.reaction_mode == "rate":
             return maybe_react_rate_events(
                 key,
@@ -325,7 +325,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                 activation_energy_eV=cfg.activation_energy_eV,
                 temperature_k=cfg.temperature_k,
                 prefactor_ps=cfg.prefactor_ps,
-                reactive_interval_ps=cfg.check_every * cfg.dt,
+                reactive_interval_ps=interval_ps,
                 max_reactions_per_check=cfg.max_reactions_per_check,
                 candidate_log_top_n=cfg.candidate_log_top_n,
                 sigma_mid=cfg.sigma_mid,
@@ -410,6 +410,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             event_file=event_file,
             candidate_file=candidate_file,
             passes_velocities=True,
+            passes_interval_ps=reaction_step_factory is None,
             checkpoint_path=checkpoint_path,
             checkpoint_every_steps=checkpoint_every_steps,
             restart_path=restart_path,

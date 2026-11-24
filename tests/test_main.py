@@ -65,7 +65,8 @@ def test_mace_relaxation_uses_md_thermal_units(monkeypatch, mocked_parser,
     def driver_stub(key, **kwargs):
         R = kwargs["init_positions"]
         kwargs["reaction_step_fn"](
-            key, R, kwargs["ff"], kwargs["sys"], jnp.zeros_like(R)
+            key, R, kwargs["ff"], kwargs["sys"], jnp.zeros_like(R),
+            interval_ps=kwargs["cfg"].check_every * kwargs["cfg"].dt,
         )
         return kwargs
 
@@ -88,3 +89,34 @@ def test_mace_relaxation_uses_md_thermal_units(monkeypatch, mocked_parser,
         assert captured["beta"] == pytest.approx(
             1.0 / (8.617333262e-5 * cfg.temperature_k)
         )
+
+
+def test_rate_application_uses_actual_chunk_interval(monkeypatch, mocked_parser):
+    from reactive_md.engine.contracts import ReactionContext, MDRunResult
+    from reactive_md.reactions import lipf6_driver
+
+    intervals = []
+
+    def fake_generic_run(key, **kwargs):
+        cfg = kwargs['cfg']
+        R = kwargs['init_positions']
+        ff, system = kwargs['ff'], kwargs['sys']
+        state = types.SimpleNamespace(position=R, velocity=jnp.zeros_like(R))
+        for step, interval in [(2, .02), (4, .02), (5, .01)]:
+            outcome = kwargs['reaction_handler'].attempt(ReactionContext(
+                key=key, step=step, interval_ps=interval, positions=R,
+                velocities=state.velocity, system=system, ff=ff,
+                box=kwargs['box'], shift_fn=kwargs['shift_fn'],
+                masses=kwargs['masses'], temperature_k=cfg.temperature_k,
+                kb_real=cfg.kb_real,
+            ))
+            intervals.append(outcome.metadata['dt_reactive_ps'])
+            assert outcome.metadata['k_rate_ps'] == 20.0
+            assert not outcome.events
+            key = outcome.key
+        return MDRunResult(state, ff, system, 0, 5, key, 0.)
+
+    monkeypatch.setattr(lipf6_driver, 'run_md_nvt', fake_generic_run)
+    lipf6_app.main(SimConfig(reaction_mode='rate', reaction_rate_ps=20.,
+                            steps=5, check_every=2, dt=.01))
+    assert intervals == pytest.approx([.02, .02, .01])
