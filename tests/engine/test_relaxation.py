@@ -1,4 +1,4 @@
-# tests/test_relaxation.py
+# tests/engine/test_relaxation.py
 
 import numpy as np
 import jax

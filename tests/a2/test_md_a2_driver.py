@@ -1,4 +1,4 @@
-# tests/test_md_a2_driver.py
+# tests/a2/test_md_a2_driver.py
 
 import jax
 import jax.numpy as jnp

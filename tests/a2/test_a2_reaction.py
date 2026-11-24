@@ -1,4 +1,4 @@
-# tests/test_a2_reaction.py
+# tests/a2/test_a2_reaction.py
 
 import numpy as np
 import jax.numpy as jnp

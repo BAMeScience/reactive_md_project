@@ -174,6 +174,24 @@ Run the repository tests with:
 python -m pytest -q tests/
 ```
 
+Tests are grouped by subsystem under `tests/`:
+
+| Directory | Coverage |
+| --- | --- |
+| `apps/` | Configuration, application dispatch and CLI |
+| `engine/` | MD integration, units and relaxation |
+| `forcefield/` | Classical force field and topology |
+| `reactions/` | Shared reaction selection, acceptance and rates |
+| `lipf6/` | LiPF6 reaction and topology workflows |
+| `mace/` | MACE energy, model and MD interfaces |
+| `restart/` | Checkpoint, restart and output consistency |
+| `a2/` | A2 demonstration and reaction workflows |
+| `a2/reference/` | Independent A2 numerical and statistical references |
+
+Pytest discovers these directories recursively. For example,
+`python -m pytest -q tests/engine/` runs the engine tests only.
+The shared marker hook remains in `tests/conftest.py`.
+
 The default suite includes all active tests, including A2 reference checks.
 For focused CPU runs in the project environment:
 

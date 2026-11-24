@@ -1,7 +1,7 @@
 """Regression tests for the vectorized A2 association finder.
 
 Run from the repository root with:
-    python -m pytest -q tests/test_a2_candidate_vectorization.py
+    python -m pytest -q tests/a2/test_a2_candidate_vectorization.py
 
 The tests import the production module directly from the repository.
 This test uses only JAX, NumPy, and pytest; JAX-MD is not required.

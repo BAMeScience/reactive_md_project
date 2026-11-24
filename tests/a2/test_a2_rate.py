@@ -1,4 +1,4 @@
-# tests/test_a2_rate.py
+# tests/a2/test_a2_rate.py
 
 import numpy as np
 import jax

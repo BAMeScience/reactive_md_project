@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-AUDIT_PATH = Path(__file__).resolve().parents[1] / 'tools' / 'audit_a2_trajectory.py'
+AUDIT_PATH = Path(__file__).resolve().parents[2] / 'tools' / 'audit_a2_trajectory.py'
 spec = importlib.util.spec_from_file_location('a2_trajectory_audit', AUDIT_PATH)
 audit = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(audit)

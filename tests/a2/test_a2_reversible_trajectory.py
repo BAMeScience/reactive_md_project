@@ -1,6 +1,6 @@
 """Integration checks for the reversible A2 NVT demonstration.
 
-Place in tests/test_a2_reversible_trajectory.py.
+Place in tests/a2/test_a2_reversible_trajectory.py.
 """
 
 import numpy as np

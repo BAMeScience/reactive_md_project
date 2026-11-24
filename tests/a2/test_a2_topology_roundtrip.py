@@ -1,7 +1,7 @@
 """Regression test for A + A -> A2 -> A + A topology and LJ exclusions.
 
-Place in the repository's tests/ directory and run from the repository root:
-    python -m pytest -q tests/test_a2_topology_roundtrip.py
+Place in the repository's tests/a2/ directory and run from the repository root:
+    python -m pytest -q tests/a2/test_a2_topology_roundtrip.py
 
 Uses the production A2 rate cycle and real force-field rebuilds. The Langevin
 relaxation is replaced with an identity operation so this is a topology test,
