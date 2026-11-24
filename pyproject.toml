@@ -45,3 +45,8 @@ packages = ["reactive_md"]
 # `pytest` and `python -m pytest` must resolve local demonstration modules alike.
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "a2: A2 demonstration, reaction, and validation tests",
+    "a2_reference: independent A2 numerical or statistical reference checks",
+    "mace_interface: dedicated MACE adapter and engine contract tests (may use surrogates)",
+]

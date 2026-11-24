@@ -174,6 +174,26 @@ Run the repository tests with:
 python -m pytest -q tests/
 ```
 
+The default suite includes all active tests, including A2 reference checks.
+For focused CPU runs in the project environment:
+
+```bash
+JAX_PLATFORMS=cpu python -m pytest -q -m a2
+JAX_PLATFORMS=cpu python -m pytest -q -m a2_reference
+JAX_PLATFORMS=cpu python -m pytest -q -m "a2 and not a2_reference"
+JAX_PLATFORMS=cpu python -m pytest -q -m mace_interface
+```
+
+The markers classify dedicated test modules; they do not describe every
+backend exercised by mixed application tests. MACE interface tests use
+controlled models or surrogates and some require optional MACE packages.
+They do not establish physical model accuracy. The independent A2 reference
+checks include fixed-coordinate MH and moving-coordinate equilibrium
+references, MD controls and calibration mathematics. They do not establish
+detailed balance for the current geometry-changing rs@md[MC] workflow.
+Archived tests are excluded from default discovery; see
+[archived_tests/README.md](archived_tests/README.md).
+
 ## Validation status and known limitations
 
 The following results were observed on a 5,264-atom LiPF6-containing system with the Materials Project MACE `small-0b2` variant:

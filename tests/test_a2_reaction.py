@@ -298,48 +298,6 @@ def test_find_association_candidates_finds_close_free_a_pair():
         2.5,
     )
 
-def test_find_association_candidates_finds_close_free_a_pair():
-    system = make_empty_system(n_atoms=4)
-
-    reaction = A2Reaction(
-        a_indices=np.array([0, 1, 2], dtype=np.int32),
-        k_bond_jax=29.8757,
-        r0_bond=1.5,
-        association_cutoff=2.7,
-    )
-
-    R = jnp.array(
-        [
-            [0.0, 0.0, 0.0],  # A0
-            [2.5, 0.0, 0.0],  # A1 -> within 2.7 A
-            [6.0, 0.0, 0.0],  # A2 -> too far
-            [0.0, 6.0, 0.0],  # B
-        ],
-        dtype=jnp.float32,
-    )
-
-    def disp_fn(a, b):
-        return b - a
-
-    candidates = reaction.find_association_candidates(
-        R,
-        disp_fn,
-        system=system,
-        cutoff=2.7,
-    )
-
-    assert len(candidates) == 1
-
-    cand = candidates[0]
-
-    assert cand.i == 0
-    assert cand.j == 1
-
-    np.testing.assert_allclose(
-        cand.distance,
-        2.5,
-    )
-
 def test_find_association_candidates_excludes_bonded_a_atoms():
     system = make_empty_system(n_atoms=4)
 
