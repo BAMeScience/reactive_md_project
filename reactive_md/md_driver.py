@@ -197,6 +197,16 @@ def run_md_nvt(
         if steps_done > int(cfg.steps):
             raise ValueError('Checkpoint is beyond requested total cfg.steps')
         accepted_events = int(saved['accepted_events'])
+        # A final short chunk has already performed a reaction check. Extending
+        # from it would shift the reaction schedule relative to an uninterrupted
+        # run, and the pre-check state is not available in this checkpoint.
+        if (steps_done < int(cfg.steps)
+                and accepted_events < int(cfg.max_events)
+                and steps_done % int(cfg.check_every) != 0):
+            raise ValueError(
+                'Cannot extend a checkpoint at a nonaligned reaction boundary; '
+                'restart from an earlier aligned checkpoint'
+            )
         relaxation_elapsed = float(saved['relaxation_elapsed_ps'])
         key = saved['key']
         state = saved['md_state']
