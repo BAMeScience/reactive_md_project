@@ -83,7 +83,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
 
     float_dtype = np.float64 if jax.config.jax_enable_x64 else np.float32
     positions = np.asarray(positions, dtype=float_dtype)
-    mass_factor, _ = md_unit_factors(cfg.md_unit_system)
+    mass_factor, kb_md = md_unit_factors(cfg.md_unit_system)
     masses = np.asarray(masses, dtype=float_dtype) * mass_factor
     atom_types = np.asarray(atom_types, dtype=np.int32)
     molecule_id = np.asarray(molecule_id, dtype=np.int32)
@@ -330,7 +330,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                 candidate_log_top_n=cfg.candidate_log_top_n,
                 sigma_mid=cfg.sigma_mid,
                 sigma_width=cfg.sigma_width,
-                velocities=velocities, masses=masses, kb_real=cfg.kb_real,
+                velocities=velocities, masses=masses, kb_real=kb_md,
                 relaxation_dt_ps=cfg.relaxation_dt_ps,
                 relaxation_time_ps=cfg.relaxation_time_ps,
                 relaxation_tau_ps=cfg.relaxation_tau_ps,
@@ -355,7 +355,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             md_neighbor_fn=md_neighbor_fn,
             candidate_log_top_n=cfg.candidate_log_top_n,
             velocities=velocities, masses=masses,
-            temperature_k=cfg.temperature_k, kb_real=cfg.kb_real,
+            temperature_k=cfg.temperature_k, kb_real=kb_md,
             relaxation_dt_ps=cfg.relaxation_dt_ps,
             relaxation_time_ps=cfg.relaxation_time_ps,
             relaxation_tau_ps=cfg.relaxation_tau_ps,
