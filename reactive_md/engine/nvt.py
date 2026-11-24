@@ -20,6 +20,50 @@ if TYPE_CHECKING:
     from ..forcefield import FFBundle
 
 
+# Compiled Nose-Hoover chunks, reused for every force field with the same settings.
+_NVT_CACHE = {}
+
+
+def _shared_nvt(static, neighbor_fn, shift_fn, dt, kT, tau):
+    """Return (init_fn, md_chunk, force_fn) where the force field goes in as an argument."""
+    from jax_md import simulate
+    from ..forcefield import energy_from_arrays
+
+    cache_key = (static, neighbor_fn, shift_fn, dt, kT, tau)
+    if cache_key in _NVT_CACHE:
+        return _NVT_CACHE[cache_key]
+
+    def energy_scalar(positions, neighbor, ff_arrays):
+        return energy_from_arrays(static, ff_arrays, positions, neighbor)
+
+    init_fn, apply_nvt = simulate.nvt_nose_hoover(
+        energy_scalar, shift_fn, dt=dt, kT=kT, tau=tau,
+    )
+
+    @partial(jax.jit, static_argnames=('chunk',))
+    def md_chunk(md_state, nlist, ff_arrays, *, chunk):
+        def body(carry, _):
+            state, nl, overflow = carry
+            nl = neighbor_fn.update(state.position, nl)
+            overflow = jnp.logical_or(overflow, nl.did_buffer_overflow)
+            state = apply_nvt(state, neighbor=nl, ff_arrays=ff_arrays)
+            return (state, nl, overflow), None
+
+        (state, nl, overflow), _ = jax.lax.scan(
+            body, (md_state, nlist, jnp.asarray(False)), xs=None, length=chunk
+        )
+        nl = neighbor_fn.update(state.position, nl)
+        overflow = jnp.logical_or(overflow, nl.did_buffer_overflow)
+        return state, nl, overflow
+
+    @jax.jit
+    def force_fn(positions, nlist, ff_arrays):
+        return -jax.grad(energy_scalar)(positions, nlist, ff_arrays)
+
+    _NVT_CACHE[cache_key] = (init_fn, md_chunk, force_fn)
+    return init_fn, md_chunk, force_fn
+
+
 class NVTStepper:
     """Nose-Hoover NVT stepping with transactional neighbor-list recovery.
 
@@ -78,6 +122,29 @@ class NVTStepper:
 
         self.md_chunk = md_chunk
 
+        # faster: force fields from build_forcefield share one compiled loop, so a reaction
+        # no longer triggers a recompile; other force fields keep the per-forcefield jit above.
+        ff_arrays = getattr(ff, 'jit_arrays', None)
+        self.shared_force = None
+        if ff_arrays is not None:
+            shared_init, shared_chunk, shared_force = _shared_nvt(
+                ff.jit_static, neighbor_fn, self.shift_fn,
+                cfg.dt, kb_md * cfg.temperature_k, cfg.tau_T,
+            )
+            from ..forcefield import stable_nlist
+
+            def md_chunk(md_state, nlist, *, chunk):
+                return shared_chunk(md_state, stable_nlist(nlist), ff_arrays, chunk=chunk)
+
+            def init_nvt(key, R, *, mass, neighbor):
+                return shared_init(key, R, mass=mass, neighbor=stable_nlist(neighbor), ff_arrays=ff_arrays)
+
+            self.init_nvt = init_nvt
+            self.md_chunk = md_chunk
+            self.shared_force = lambda positions, nlist: shared_force(
+                positions, stable_nlist(nlist), ff_arrays
+            )
+
     def allocate_valid_nlist(self, positions, *, extra_capacity=0):
         for attempt in range(self.max_retries + 1):
             nl = self.ff.neighbor_fn.allocate(
@@ -95,6 +162,14 @@ class NVTStepper:
     def refresh_force(self, state, nlist):
         if not hasattr(state, 'force'):
             raise RuntimeError('NVT state does not expose its cached force')
+        # return replace(
+        #     state,
+        #     force=-jax.grad(self.energy_scalar)(state.position, neighbor=nlist),
+        # )
+        # faster: use the cached, jitted force when we have one; the plain grad ran op by op.
+        shared_force = getattr(self, 'shared_force', None)
+        if shared_force is not None:
+            return replace(state, force=shared_force(state.position, nlist))
         return replace(
             state,
             force=-jax.grad(self.energy_scalar)(state.position, neighbor=nlist),
@@ -108,10 +183,23 @@ class NVTStepper:
             trial_state, trial_nlist, overflow = self.md_chunk(
                 state, nlist, chunk=int(chunk)
             )
-            if not bool(np.asarray(overflow)):
-                if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
+            # if not bool(np.asarray(overflow)):
+            #     if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
+            #         raise FloatingPointError('Nonfinite positions in accepted NVT chunk')
+            #     if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
+            #         raise FloatingPointError('Nonfinite momenta in accepted NVT chunk')
+            #     return trial_state, trial_nlist
+
+            # faster: fetch the overflow flag and both finite checks in one device round trip.
+            overflow, finite_pos, finite_mom = jax.device_get((
+                overflow,
+                jnp.all(jnp.isfinite(trial_state.position)),
+                jnp.all(jnp.isfinite(trial_state.momentum)),
+            ))
+            if not bool(overflow):
+                if not bool(finite_pos):
                     raise FloatingPointError('Nonfinite positions in accepted NVT chunk')
-                if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
+                if not bool(finite_mom):
                     raise FloatingPointError('Nonfinite momenta in accepted NVT chunk')
                 return trial_state, trial_nlist
             if attempt == self.max_retries:

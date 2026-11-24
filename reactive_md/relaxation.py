@@ -21,6 +21,44 @@ from jax_md import simulate
 _RELAXATION_CHUNK_STEPS = 50
 _MAX_NLIST_RETRIES = 12
 
+# Compiled Langevin chunks, reused for every force field with the same settings.
+_LANGEVIN_CACHE = {}
+
+
+def _shared_langevin(static, neighbor_fn, shift_fn, dt_ps, kT, gamma):
+    """Return (init_fn, run_chunk) where the force field goes in as an argument."""
+    from .forcefield import energy_from_arrays
+
+    cache_key = (static, neighbor_fn, shift_fn, dt_ps, kT, gamma)
+    if cache_key in _LANGEVIN_CACHE:
+        return _LANGEVIN_CACHE[cache_key]
+
+    def energy_scalar(positions, neighbor, ff_arrays):
+        return energy_from_arrays(static, ff_arrays, positions, neighbor)
+
+    init_fn, apply_fn = simulate.nvt_langevin(
+        energy_scalar, shift_fn, dt=dt_ps, kT=kT, gamma=gamma,
+    )
+
+    @partial(jax.jit, static_argnames=("chunk",))
+    def run_chunk(state, nlist, ff_arrays, *, chunk):
+        def body(carry, _):
+            current_state, current_nlist, overflow_seen = carry
+            current_nlist = neighbor_fn.update(current_state.position, current_nlist)
+            overflow_seen = jnp.logical_or(overflow_seen, current_nlist.did_buffer_overflow)
+            current_state = apply_fn(current_state, neighbor=current_nlist, ff_arrays=ff_arrays)
+            return (current_state, current_nlist, overflow_seen), None
+
+        (trial_state, trial_nlist, overflow_seen), _ = jax.lax.scan(
+            body, (state, nlist, jnp.asarray(False)), xs=None, length=chunk,
+        )
+        trial_nlist = neighbor_fn.update(trial_state.position, trial_nlist)
+        overflow_seen = jnp.logical_or(overflow_seen, trial_nlist.did_buffer_overflow)
+        return trial_state, trial_nlist, overflow_seen
+
+    _LANGEVIN_CACHE[cache_key] = (init_fn, run_chunk)
+    return init_fn, run_chunk
+
 
 def langevin_relax_with_nlist(
     key,
@@ -78,6 +116,18 @@ def langevin_relax_with_nlist(
         gamma=gamma,
     )
 
+    # faster: force fields from build_forcefield use one compiled loop for the whole run;
+    # anything else (custom or test force fields) still goes through the old per-call jit below.
+    ff_arrays = getattr(ff, "jit_arrays", None)
+    if ff_arrays is not None:
+        shared_init, shared_chunk = _shared_langevin(
+            ff.jit_static, ff.neighbor_fn, shift_fn, dt_ps, kT, gamma,
+        )
+        from .forcefield import stable_nlist
+
+        def init_fn(key, R, *, mass, neighbor):
+            return shared_init(key, R, mass=mass, neighbor=stable_nlist(neighbor), ff_arrays=ff_arrays)
+
     def allocate_valid_nlist(positions, *, extra_capacity=0):
         """Allocate outside JIT; grow storage until no overflow is reported."""
         for attempt in range(_MAX_NLIST_RETRIES + 1):
@@ -133,6 +183,10 @@ def langevin_relax_with_nlist(
         )
         return trial_state, trial_nlist, overflow_seen
 
+    if ff_arrays is not None:
+        def run_chunk(state, nlist, *, chunk):
+            return shared_chunk(state, stable_nlist(nlist), ff_arrays, chunk=chunk)
+
     def advance_chunk(state, nlist, *, chunk):
         if bool(np.asarray(nlist.did_buffer_overflow)):
             raise RuntimeError(
@@ -144,13 +198,31 @@ def langevin_relax_with_nlist(
             trial_state, trial_nlist, overflow_seen = run_chunk(
                 state, nlist, chunk=chunk
             )
-            if not bool(np.asarray(overflow_seen)):
+            # if not bool(np.asarray(overflow_seen)):
+            #     # Only a fully validated chunk is accepted.
+            #     if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
+            #         raise FloatingPointError(
+            #             "Nonfinite positions in accepted Langevin chunk."
+            #         )
+            #     if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
+            #         raise FloatingPointError(
+            #             "Nonfinite momenta in accepted Langevin chunk."
+            #         )
+            #     return trial_state, trial_nlist
+
+            # faster: fetch the overflow flag and both finite checks in one device round trip.
+            overflow, finite_pos, finite_mom = jax.device_get((
+                overflow_seen,
+                jnp.all(jnp.isfinite(trial_state.position)),
+                jnp.all(jnp.isfinite(trial_state.momentum)),
+            ))
+            if not bool(overflow):
                 # Only a fully validated chunk is accepted.
-                if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
+                if not bool(finite_pos):
                     raise FloatingPointError(
                         "Nonfinite positions in accepted Langevin chunk."
                     )
-                if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
+                if not bool(finite_mom):
                     raise FloatingPointError(
                         "Nonfinite momenta in accepted Langevin chunk."
                     )

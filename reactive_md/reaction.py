@@ -595,7 +595,12 @@ def maybe_react_rate_events(
     # Candidate loop.
     # ---------------------------------------------------------
 
-    for cand in candidates:
+    # faster: draw the random numbers for all candidates in one call, not two device calls per candidate.
+    key, sub = jax.random.split(key)
+    uniforms = np.asarray(jax.random.uniform(sub, (len(candidates), 2)))
+
+    # for cand in candidates:
+    for n_cand, cand in enumerate(candidates):
         if len(accepted_events) >= max_reactions_per_check:
             break
 
@@ -631,8 +636,9 @@ def maybe_react_rate_events(
         # Gate 1: reaction-coordinate / geometric gate.
         # -----------------------------------------------------
 
-        key, sub = jax.random.split(key)
-        u_sigma = float(jax.random.uniform(sub))
+        # key, sub = jax.random.split(key)
+        # u_sigma = float(jax.random.uniform(sub))
+        u_sigma = float(uniforms[n_cand, 0])
 
         if u_sigma >= p_sigma:
             continue
@@ -644,8 +650,9 @@ def maybe_react_rate_events(
         # second random draw.
         # -----------------------------------------------------
 
-        key, sub = jax.random.split(key)
-        u_rate = float(jax.random.uniform(sub))
+        # key, sub = jax.random.split(key)
+        # u_rate = float(jax.random.uniform(sub))
+        u_rate = float(uniforms[n_cand, 1])
 
         if u_rate >= event_p_rate:
             continue

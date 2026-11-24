@@ -12,20 +12,38 @@ from reactive_md.reactions import lipf6
 def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
     """A rate sweep may accept several events but must relax only once."""
 
+    # candidates = [
+    #     lipf6.ReactionCandidate(
+    #         k_pf6=0,
+    #         li_idx=14,
+    #         leave_F=1,
+    #         d_lif=1.8,
+    #         d_pf=1.6,
+    #     ),
+    #     lipf6.ReactionCandidate(
+    #         k_pf6=1,
+    #         li_idx=15,
+    #         leave_F=8,
+    #         d_lif=1.9,
+    #         d_pf=1.6,
+    #     ),
+    # ]
+    # sigma = d_pf - d_lif = +2 gives p_sigma ~ 1, so both events are accepted
+    # whatever random numbers are drawn (the old values only passed for one seed).
     candidates = [
         lipf6.ReactionCandidate(
             k_pf6=0,
             li_idx=14,
             leave_F=1,
-            d_lif=1.8,
-            d_pf=1.6,
+            d_lif=1.0,
+            d_pf=3.0,
         ),
         lipf6.ReactionCandidate(
             k_pf6=1,
             li_idx=15,
             leave_F=8,
-            d_lif=1.9,
-            d_pf=1.6,
+            d_lif=1.1,
+            d_pf=3.1,
         ),
     ]
 
