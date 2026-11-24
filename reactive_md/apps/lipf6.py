@@ -52,6 +52,12 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
          checkpoint_every_steps: int | None = None,
          restart_path: str | None = None):
     """Run LiPF6 MD; cfg.steps is the total target step on restart."""
+    if cfg.reaction_mode not in ("metropolis", "rate"):
+        raise ValueError(f"Unsupported reaction mode: {cfg.reaction_mode!r}")
+    if cfg.reaction_mode == "rate" and cfg.use_mace_mc:
+        raise ValueError("MACE-MC is only supported in metropolis mode")
+    if cfg.reaction_mode == "metropolis" and cfg.use_mace_md and not cfg.use_mace_mc:
+        raise ValueError("Metropolis with MACE-MD requires MACE-MC")
     if restart_path is not None and checkpoint_path is None:
         checkpoint_path = restart_path
     checkpoint_enabled = checkpoint_path is not None or restart_path is not None

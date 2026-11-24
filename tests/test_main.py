@@ -120,3 +120,100 @@ def test_rate_application_uses_actual_chunk_interval(monkeypatch, mocked_parser)
     lipf6_app.main(SimConfig(reaction_mode='rate', reaction_rate_ps=20.,
                             steps=5, check_every=2, dt=.01))
     assert intervals == pytest.approx([.02, .02, .01])
+
+
+@pytest.mark.parametrize('mode,mc,md', [
+    ('metropolis', False, False),
+    ('metropolis', True, False),
+    ('metropolis', True, True),
+    ('rate', False, False),
+    ('rate', False, True),
+])
+def test_supported_application_modes(monkeypatch, mocked_parser, mode, mc, md):
+    from reactive_md.mace_mc_energy import MaceJaxEnergyEvaluator
+
+    neighbor = object()
+    model = object()
+    calls = []
+    setup = types.ModuleType('reactive_md.mace_setup')
+    energy = types.ModuleType('reactive_md.mace_energy')
+
+    def build_model(**kwargs):
+        calls.append(('model', kwargs))
+        return model, {}, None
+
+    def build_energy(**kwargs):
+        calls.append(('energy', kwargs))
+        return None, None, neighbor, lambda nl: lambda R, **kw: jnp.asarray(2.)
+
+    setup.build_mace_model = build_model
+    energy.build_mace_energy_system = build_energy
+    monkeypatch.setitem(sys.modules, setup.__name__, setup)
+    monkeypatch.setitem(sys.modules, energy.__name__, energy)
+    captured = []
+
+    def reaction_stub(name):
+        def run(*args, **kwargs):
+            captured.append((name, kwargs))
+        return run
+
+    monkeypatch.setattr(lipf6_app, 'maybe_react_one_event', reaction_stub('metropolis'))
+    monkeypatch.setattr(lipf6_app, 'maybe_react_rate_events', reaction_stub('rate'))
+
+    def driver(key, **kwargs):
+        R = kwargs['init_positions']
+        kwargs['reaction_step_fn'](key, R, kwargs['ff'], kwargs['sys'],
+                                   jnp.zeros_like(R), interval_ps=.01)
+        return kwargs
+
+    monkeypatch.setattr(lipf6_app, 'run_md_nvt_with_reactions', driver)
+    cfg = SimConfig(reaction_mode=mode, use_mace_mc=mc, use_mace_md=md,
+                    reaction_rate_ps=2. if mode == 'rate' else None,
+                    mace_source='mp', mace_variant='small-0b2',
+                    mace_dr_threshold=.7, mace_capacity_multiplier=2.)
+    result = lipf6_app.main(cfg)
+    assert len(captured) == 1
+    name, kw = captured[0]
+    assert name == mode
+    assert (result['md_energy_fn'] is not None) == md
+    assert result['md_neighbor_fn'] is (neighbor if md else None)
+    assert kw['md_energy_fn'] is result['md_energy_fn']
+    assert kw['md_neighbor_fn'] is result['md_neighbor_fn']
+    if mode == 'metropolis':
+        evaluator = kw['mc_energy_evaluator']
+        if mc:
+            assert isinstance(evaluator, MaceJaxEnergyEvaluator)
+            assert evaluator.neighbor_fn is neighbor
+        else:
+            assert evaluator is None
+        kb = 8.617333262e-5 if mc else cfg.kb_real
+        assert kw['beta'] == pytest.approx(1. / (kb * cfg.temperature_k))
+    else:
+        assert 'mc_energy_evaluator' not in kw
+        assert kw['reactive_interval_ps'] == .01
+    if mc or md:
+        assert [name for name, _ in calls] == ['model', 'energy']
+        assert calls[0][1] == {'source': cfg.mace_source, 'variant': cfg.mace_variant}
+        options = calls[1][1]
+        assert options['jax_model'] is model
+        assert options['ensemble'] == 'nve'
+        assert options['dr_threshold'] == .7
+        assert options['capacity_multiplier'] == 2.
+        np.testing.assert_array_equal(options['z_atomic'], [6, 6])
+    else:
+        assert calls == []
+
+
+@pytest.mark.parametrize('mode,mc,md,message', [
+    ('metropolis', False, True, 'requires MACE-MC'),
+    ('rate', True, False, 'only supported in metropolis'),
+    ('rate', True, True, 'only supported in metropolis'),
+    ('unknown', False, False, 'Unsupported reaction mode'),
+])
+def test_unsupported_application_modes_fail_before_io(monkeypatch, mode, mc, md, message):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Invalid mode reached input parsing')
+
+    monkeypatch.setattr(lipf6_app, 'parse_lammps_data', forbidden)
+    with pytest.raises(ValueError, match=message):
+        lipf6_app.main(SimConfig(reaction_mode=mode, use_mace_mc=mc, use_mace_md=md))

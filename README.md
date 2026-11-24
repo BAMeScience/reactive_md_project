@@ -10,7 +10,7 @@ Reactive molecular dynamics with topology-changing reactions, built on [JAX-MD](
 - Topology-changing reactions with a chemistry-neutral MD driver and reaction handlers.
 - LiPF6 decomposition example, with rate-based or sigma-gated Metropolis proposals.
 - Optional activation-energy-derived reaction rates.
-- Optional MACE-JAX **MD forces** (`--use-mace-md`) and **Metropolis energies** (`--use-mace-mc`), independently selectable.
+- Optional MACE-JAX **MD forces** (`--use-mace-md`) and **Metropolis energies** (`--use-mace-mc`), selectable in the five supported combinations below.
 - Post-reaction Langevin relaxation and neighbor-list/force synchronization. The MACE-backed relaxation path is under active integration testing.
 - Experimental A2 reaction handlers and compatibility entry points.
 
@@ -96,16 +96,17 @@ python -m reactive_md.apps.lipf6 \
   --mace-variant small-0b2
 ```
 
-The MACE flags select different components:
+The five supported combinations are:
 
-| `--use-mace-md` | `--use-mace-mc` | NVT forces | Metropolis energy |
-| --- | --- | --- | --- |
-| Off | Off | Classical | Classical |
-| Off | On | Classical | MACE-JAX |
-| On | Off | MACE-JAX | Classical |
-| On | On | MACE-JAX | MACE-JAX |
+| Reaction mode | `--use-mace-md` | `--use-mace-mc` | NVT forces | Metropolis energy |
+| --- | --- | --- | --- | --- |
+| metropolis | Off | Off | Classical | Classical |
+| metropolis | Off | On | Classical | MACE-JAX |
+| metropolis | On | On | MACE-JAX | MACE-JAX |
+| rate | Off | Off | Classical | Not used |
+| rate | On | Off | MACE-JAX | Not used |
 
-The Metropolis-energy column applies only to `--reaction-mode metropolis`; rate mode does not use a Metropolis energy test. In MACE MD mode, post-reaction relaxation is intended to use the selected MACE MD energy/forces; verify that wiring in the current checkout before production use.
+MACE-MC is not used in rate mode. Metropolis with MACE-MD requires MACE-MC; the classical trial-energy path does not support MACE relaxation neighbor lists. Unsupported combinations are rejected at application entry. Post-reaction relaxation uses the selected MD energy and neighbor-list backend.
 
 ## LiPF6 reaction model
 
