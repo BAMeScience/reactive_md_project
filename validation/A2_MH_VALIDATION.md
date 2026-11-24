@@ -42,7 +42,7 @@ states. `alpha` must be zero when the reverse proposal has zero probability.
 
 | File | Scope | Where it can run |
 | --- | --- | --- |
-| `tests/test_a2_mh_exact_reference.py` | Independent 10-state/12-edge finite-state kernel; detailed balance, row sums, stationary Boltzmann distribution, null directions, several `p` and `kT` values | Any Python with pytest |
+| `tests/a2/reference/test_a2_mh_exact_reference.py` | Independent 10-state/12-edge finite-state kernel; detailed balance, row sums, stationary Boltzmann distribution, null directions, several `p` and `kT` values | Any Python with pytest |
 | `tests/test_a2_metropolis_detailed_balance.py` | Actual production MH implementation on all **24 directed edges** with a synthetic topology-energy evaluator; proposal ratios, acceptance, state changes, impossible reverse, invalid inputs, null direction | HPC JAX/JAX-MD environment |
 | `tests/test_a2_metropolis_detailed_balance.py` | Actual JAX-MD energy and exclusion-mask construction, per-bond offset, forward/reverse energy and MH acceptance round trip | HPC JAX/JAX-MD environment |
 
@@ -56,7 +56,7 @@ From the repository root, in the **same HPC environment** that passed the
 previous A₂ kinetic regression:
 
 ```bash
-python -m pytest -q tests/test_a2_mh_exact_reference.py
+python -m pytest -q tests/a2/reference/test_a2_mh_exact_reference.py
 python -m pytest -q tests/test_a2_metropolis_detailed_balance.py
 python -m pytest -q tests/
 ```

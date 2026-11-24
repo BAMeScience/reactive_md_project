@@ -36,13 +36,13 @@ cd ~/programs/reactive_md_project
 cp /tmp/a2_thermostat_one_shot/validation/a2_thermostat_calibration_math.py validation/
 cp /tmp/a2_thermostat_one_shot/validation/run_a2_thermostat_calibration.py validation/
 cp /tmp/a2_thermostat_one_shot/validation/A2_THERMOSTAT_ONE_SHOT_CALIBRATION.md validation/
-cp /tmp/a2_thermostat_one_shot/tests/test_a2_thermostat_calibration_math.py tests/
+cp /tmp/a2_thermostat_one_shot/tests/test_a2_thermostat_calibration_math.py tests/a2/reference/
 ```
 
 ## One command, four cases
 
 ```bash
-python -m pytest -q tests/test_a2_thermostat_calibration_math.py
+python -m pytest -q tests/a2/reference/test_a2_thermostat_calibration_math.py
 python -m validation.run_a2_thermostat_calibration \
   --replicas 64 --steps 4000 --sample-every 100 --burn-in-steps 1000 \
   --gamma 10 --tau-T 0.1 --dt 0.00025 \

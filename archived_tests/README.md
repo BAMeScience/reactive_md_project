@@ -6,7 +6,7 @@ regression suite. Default pytest discovery is restricted to `tests/` by
 
 | File or directory | Reason for archival |
 | --- | --- |
-| `test_topology_opls.py` | Superseded by `tests/test_lipf6.py`, which exercises the same cases using current imports. |
+| `test_topology_opls.py` | Superseded by `tests/lipf6/test_lipf6.py`, which exercises the same cases using current imports. |
 | `test_reaction.py` | Uses the obsolete `propose_reaction_trial` API. Current LiPF6 reaction tests exercise the replacement workflow. |
 | `legacy_fixed_coordinate_mh/` | Historical production-kernel checks for the earlier fixed-coordinate A2 MH workflow. Not a validation of the current geometry-changing rs@md[MC] algorithm. |
 

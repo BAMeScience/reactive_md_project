@@ -26,13 +26,13 @@ cd ~/programs/reactive_md_project
 cp /tmp/a2_mixing_patch/validation/a2_mh_mixing_reference.py validation/
 cp /tmp/a2_mixing_patch/validation/run_a2_mh_coordinate_mixing.py validation/
 cp /tmp/a2_mixing_patch/validation/A2_MH_COORDINATE_MIXING.md validation/
-cp /tmp/a2_mixing_patch/tests/test_a2_mh_mixing_reference.py tests/
+cp /tmp/a2_mixing_patch/tests/test_a2_mh_mixing_reference.py tests/a2/reference/
 ```
 
 ## Run on HPC
 
 ```bash
-python -m pytest -q tests/test_a2_mh_mixing_reference.py
+python -m pytest -q tests/a2/reference/test_a2_mh_mixing_reference.py
 
 # First: short performance and trace pilot (0.25 ps per chain)
 python -m validation.run_a2_mh_coordinate_mixing \

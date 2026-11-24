@@ -46,13 +46,13 @@ cd ~/programs/reactive_md_project
 cp /tmp/a2_md_only_control/validation/a2_md_only_reference.py validation/
 cp /tmp/a2_md_only_control/validation/run_a2_md_only_thermostat_control.py validation/
 cp /tmp/a2_md_only_control/validation/A2_MD_ONLY_THERMOSTAT_CONTROL.md validation/
-cp /tmp/a2_md_only_control/tests/test_a2_md_only_reference.py tests/
+cp /tmp/a2_md_only_control/tests/test_a2_md_only_reference.py tests/a2/reference/
 ```
 
 ## Run
 
 ```bash
-python -m pytest -q tests/test_a2_md_only_reference.py
+python -m pytest -q tests/a2/reference/test_a2_md_only_reference.py
 
 # Short diagnostic: 1000 MD steps = 0.25 ps per case, 8 cases total
 python -m validation.run_a2_md_only_thermostat_control \

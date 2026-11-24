@@ -34,7 +34,7 @@ Extract the additive ZIP and copy its `validation/` and `tests/` files into the 
 
 ```bash
 cd ~/programs/reactive_md_project
-python -m pytest -q tests/test_a2_mh_kernel_reference.py
+python -m pytest -q tests/a2/reference/test_a2_mh_kernel_reference.py
 python -m pytest -q tests/test_a2_mh_kernel_production.py
 python -m validation.run_a2_mh_kernel_audit --output validation/a2_mh_kernel_audit.json
 ```

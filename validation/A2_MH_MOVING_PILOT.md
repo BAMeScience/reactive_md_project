@@ -47,13 +47,13 @@ cd ~/programs/reactive_md_project
 cp /tmp/a2_moving_patch/validation/a2_mh_moving_reference.py validation/
 cp /tmp/a2_moving_patch/validation/run_a2_mh_moving_pilot.py validation/
 cp /tmp/a2_moving_patch/validation/A2_MH_MOVING_PILOT.md validation/
-cp /tmp/a2_moving_patch/tests/test_a2_mh_moving_reference.py tests/
+cp /tmp/a2_moving_patch/tests/test_a2_mh_moving_reference.py tests/a2/reference/
 ```
 
 Run the fast independent-reference tests:
 
 ```bash
-python -m pytest -q tests/test_a2_mh_moving_reference.py
+python -m pytest -q tests/a2/reference/test_a2_mh_moving_reference.py
 ```
 
 Run the **short integration pilot** (real NVT Nose-Hoover + production MH):
