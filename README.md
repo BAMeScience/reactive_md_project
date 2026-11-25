@@ -168,7 +168,7 @@ python -m reactive_md.apps.lipf6 \
 
 Checkpoint/restart is implemented for all five LiPF6 simulation modes, including MACE-MD. Use `--checkpoint-file state.pkl --checkpoint-every 1000` (the interval must be a positive multiple of `--check-every`). To continue, use `--restart-from state.pkl --steps TOTAL_STEPS` with the same original input files, model, simulation settings and output paths. The target step count includes the completed steps. Checkpointed output files must be uncompressed; output beyond the saved boundary is rolled back on restart. A terminal partial reaction interval cannot be extended. Load only trusted checkpoints (pickle format).
 
-MACE-MD checkpoints validate a backend fingerprint and reconstruct both neighbor lists. Regression tests use a differentiable surrogate rather than foundation-model weights. Verify restart equivalence with the actual MACE model and installed software stack before relying on this feature for production.
+MACE-MD checkpoints validate a backend fingerprint and reconstruct both neighbor lists. Regression tests use a differentiable surrogate rather than foundation-model weights. Actual MACE-MP `small-0b2` restart checks have also passed on the LiPF6 benchmark described below. Verify equivalence for your own model, system and software stack before relying on this feature for production.
 
 Run the repository tests with:
 
@@ -216,19 +216,27 @@ Archived tests are excluded from default discovery; see
 
 ## Validation status and known limitations
 
-The following results were observed on a 5,264-atom LiPF6-containing system with the Materials Project MACE `small-0b2` variant:
+The Phase 6 CPU regression suite passed all 309 tests with strict markers.
+Actual MACE-MP `small-0b2` GPU restart validation on a 5,264-atom
+LiPF6-containing system produced the following results:
 
-| Integration check | Observed result |
-| --- | --- |
-| MACE-JAX NVT, 30 steps, reactions disabled | Completed; final positions, momenta, and forces finite |
-| MACE-JAX MD + rate-mode reaction, minimal run | One accepted event; one PF6 unit reacted |
-| MACE-JAX MD + MACE Metropolis, minimal run | MACE energy evaluations completed; one accepted event |
-| MD continuation after an accepted event | Not yet established by these tests |
-| Longer reactive MACE simulations | Not validated; a previous run failed with GPU out-of-memory |
+| Simulation | Uninterrupted / split steps | Accepted events | Result |
+| --- | --- | --- | --- |
+| MACE-MD, reactions disabled | 400 / 200 + 200 | 0 | Identical trajectory dumps |
+| Rate MACE | 100 / 50 + 50 | 10 | Identical dumps; numerically equivalent reaction logs |
+| MC MACE | 100 / 50 + 50 | 4 | Identical dumps; numerically equivalent reaction logs |
 
-Both minimal reactive benchmarks produced a **7.71 GiB GPU allocation warning** but completed. The cause has not yet been isolated; potential contributors include MACE force/relaxation compilation, temporary buffers, and neighbor-list memory. These observations do not establish numerical accuracy, thermodynamic sampling correctness, or long-term stability.
+The reactive runs completed after compiling MACE force evaluation and
+thermostat initialization paths to reduce GPU memory pressure. An earlier
+reactive run failed with a 7.71 GiB allocation request. The successful short
+runs do not establish peak memory requirements or long-duration stability.
 
-The artificial reaction parameters used in the smoke tests were selected to exercise code paths; **do not use them as physical production parameters**.
+See [MACE checkpoint/restart validation](validation/MACE_CHECKPOINT_RESTART.md)
+for the protocol, observed numerical differences and scope of these results.
+The comparisons establish recorded-output equivalence, not bitwise equality
+of all internal checkpoint state or physical model accuracy. The artificial
+reaction parameters used to exercise code paths are **not physical production
+parameters**. Equilibrium sampling correctness remains a separate question.
 
 ## Repository architecture
 
