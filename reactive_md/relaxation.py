@@ -102,6 +102,15 @@ def langevin_relax_with_nlist(
         gamma=gamma,
     )
 
+    def force_fn(positions, neighbor):
+        return -jax.grad(energy_scalar)(positions, neighbor=neighbor)
+
+    # The initializer evaluates a force before the compiled Langevin chunk.
+    # Compile it and the overflow-recovery force for the MACE backend too.
+    if md_energy_fn is not None:
+        init_fn = jax.jit(init_fn)
+        force_fn = jax.jit(force_fn)
+
     def allocate_valid_nlist(positions, *, extra_capacity=0):
         """Allocate outside JIT; grow storage until no overflow is reported."""
         for attempt in range(_MAX_NLIST_RETRIES + 1):
@@ -198,9 +207,7 @@ def langevin_relax_with_nlist(
             if hasattr(state, "force"):
                 state = replace(
                     state,
-                    force=-jax.grad(energy_scalar)(
-                        state.position, neighbor=nlist
-                    ),
+                    force=force_fn(state.position, nlist),
                 )
 
         raise AssertionError("Unreachable Langevin recovery state")

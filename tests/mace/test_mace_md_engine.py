@@ -184,3 +184,31 @@ def test_mace_driver_rejects_persistent_classical_overflow():
             md_energy_fn=md_energy, md_neighbor_fn=MDNeighborFunction(),
         )
     assert len(ff.neighbor_fn.capacities) == 13
+
+
+def test_mace_force_refresh_reuses_compiled_kernel():
+    positions = jnp.ones((2, 3))
+    traces = []
+
+    def energy(r, neighbor):
+        traces.append(None)
+        return md_energy(r, neighbor)
+
+    neighbors = MDNeighborFunction()
+    stepper = NVTStepper(cfg=SimConfig(), ff=classical_ff(positions),
+                         shift_fn=shift, masses=jnp.ones(2),
+                         md_energy_fn=energy, md_neighbor_fn=neighbors)
+    nl = neighbors.allocate(positions)
+    state = State(positions, positions, positions, None)
+    kernel = stepper.force_fn
+    traces.clear()
+    first = stepper.refresh_force(state, nl)
+    outcome = ReactionOutcome(
+        key=None, positions=positions + 2, velocities=positions,
+        system=None, ff=classical_ff(positions), events=('reaction',),
+    )
+    second, _ = stepper.synchronize(first, outcome)
+    np.testing.assert_allclose(first.force, -positions)
+    np.testing.assert_allclose(second.force, -(positions + 2))
+    assert stepper.force_fn is kernel
+    assert len(traces) == 1

@@ -77,6 +77,18 @@ class NVTStepper:
             kT=kb_md * cfg.temperature_k,
             tau=cfg.tau_T,
         )
+        # MACE gradients can have very large intermediates. Compile the
+        # complete force (including negation) and initializer, rather than
+        # dispatching individual gradient primitives outside the MD chunk.
+        # Keep these callables for the lifetime of the MACE stepper.
+        def force_fn(positions, neighbor):
+            return -jax.grad(self.energy_scalar)(positions, neighbor=neighbor)
+
+        self.force_fn = force_fn
+        if self.md_energy_fn is not None:
+            self.force_fn = jax.jit(force_fn)
+            self.init_nvt = jax.jit(self.init_nvt)
+
         neighbor_fn = (
             self.md_neighbor_fn
             if self.md_neighbor_fn is not None
@@ -128,7 +140,7 @@ class NVTStepper:
             raise RuntimeError('NVT state does not expose its cached force')
         return replace(
             state,
-            force=-jax.grad(self.energy_scalar)(state.position, neighbor=nlist),
+            force=self.force_fn(state.position, nlist),
         )
 
     def advance(self, state, nlist, *, chunk):
