@@ -1,5 +1,6 @@
 
 from types import SimpleNamespace
+from typing import NamedTuple
 
 import jax.numpy as jnp
 import pytest
@@ -10,9 +11,9 @@ from reactive_md.reactions import lipf6_driver
 from reactive_md.reactions.lipf6_output import LiPF6OutputObserver
 
 
-class FakeNeighbor:
-    def __init__(self, overflow):
-        self.did_buffer_overflow = jnp.asarray(overflow)
+class FakeNeighbor(NamedTuple):
+    did_buffer_overflow: object
+    idx: object
 
     def update(self, positions):
         return self
@@ -26,15 +27,17 @@ class FakeNeighborFunction:
     def allocate(self, positions, *, extra_capacity=0):
         self.capacities.append(extra_capacity)
         overflow = self.always_overflow or extra_capacity < 8
-        return FakeNeighbor(overflow)
+        return FakeNeighbor(jnp.asarray(overflow), jnp.asarray([[len(self.capacities)]], dtype=jnp.int32))
 
 
-def make_observer(neighbor_fn):
+def make_observer(neighbor_fn, energy_fn=None):
     return LiPF6OutputObserver(
         cfg=SimConfig(check_every=10),
         box=jnp.array([10.0, 10.0, 10.0]),
         masses=jnp.ones((1,)),
-        md_energy_fn=lambda positions, neighbors: jnp.asarray(7.0),
+        md_energy_fn=energy_fn if energy_fn is not None else (
+            lambda positions, neighbors: jnp.asarray(7.0)
+        ),
         md_neighbor_fn=neighbor_fn,
     )
 
@@ -88,7 +91,29 @@ def test_mace_observer_rejects_persistent_overflow():
     assert len(neighbor_fn.capacities) == 13
 
 
+def test_mace_observer_reuses_compiled_energy_with_dynamic_inputs(capsys):
+    traces = []
+
+    def energy_fn(positions, neighbors):
+        traces.append(1)
+        return jnp.sum(positions ** 2) + jnp.sum(neighbors.idx)
+
+    neighbor_fn = FakeNeighborFunction()
+    observer = make_observer(neighbor_fn, energy_fn)
+    first = make_observation()
+    observer.on_before_reaction(first)
+    assert "PE= 2.000000" in capsys.readouterr().out
+
+    second = make_observation()
+    second.state.position = jnp.ones((1, 3))
+    observer.on_before_reaction(second)
+    assert "PE= 7.000000" in capsys.readouterr().out
+    assert traces == [1]
+    assert neighbor_fn.capacities == [2, 8, 2, 8]
+
+
 def test_lipf6_wrapper_keeps_observer_with_mace(monkeypatch):
+
     captured = {}
     ff = SimpleNamespace()
     sys = SimpleNamespace(pf6_reacted=jnp.array([False]))

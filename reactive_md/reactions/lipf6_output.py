@@ -227,6 +227,12 @@ class LiPF6OutputObserver:
                 "md_energy_fn and md_neighbor_fn must be provided together"
             )
         self.md_energy_fn = md_energy_fn
+        # Compile the complete scalar evaluation once per observer instead of
+        # dispatching individual MACE operations and materializing intermediates.
+        # Neighbor lists remain dynamic inputs, including after topology changes.
+        self._compiled_md_energy = (
+            jax.jit(md_energy_fn) if md_energy_fn is not None else None
+        )
         self.md_neighbor_fn = md_neighbor_fn
         if self.resume:
             # A restart must not open an existing output with 'w' or 'x':
@@ -369,7 +375,7 @@ class LiPF6OutputObserver:
                 raise RuntimeError(
                     "MACE observer neighbor-list allocation overflowed"
                 )
-            energy = self.md_energy_fn(state.position, neighbors)
+            energy = self._compiled_md_energy(state.position, neighbors)
         energy.block_until_ready()
         kinetic = 0.5 * jnp.sum(self.masses[:, None] * state.velocity ** 2)
         kinetic.block_until_ready()
