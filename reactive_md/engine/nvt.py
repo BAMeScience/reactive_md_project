@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from functools import partial
+import os
 from typing import TYPE_CHECKING
 
 import jax
@@ -114,12 +115,36 @@ class NVTStepper:
 
         self.md_chunk = md_chunk
 
+    def _neighbor_diagnostic(self, event, nlist=None, **details):
+        """Opt-in host-side diagnostics; never called inside a compiled kernel."""
+        if getattr(self, 'md_energy_fn', None) is None:
+            return
+        if os.environ.get('REACTIVE_MD_NLIST_DIAGNOSTICS') != '1':
+            return
+        if nlist is not None:
+            details['idx_shape'] = tuple(nlist.idx.shape)
+        try:
+            stats = jax.devices()[0].memory_stats() or {}
+            for name in ('bytes_in_use', 'peak_bytes_in_use', 'bytes_limit'):
+                if name in stats:
+                    details[name] = stats[name]
+        except (RuntimeError, NotImplementedError, AttributeError):
+            pass
+        print('[MACE NLIST] ' + event + ' ' + ' '.join(
+            f'{key}={value}' for key, value in details.items()
+        ), flush=True)
+
     def allocate_valid_nlist(self, positions, *, extra_capacity=0):
         for attempt in range(self.max_retries + 1):
             nl = self.neighbor_fn.allocate(
                 positions, extra_capacity=extra_capacity
             )
-            if not bool(np.asarray(nl.did_buffer_overflow)):
+            overflow = bool(np.asarray(nl.did_buffer_overflow))
+            self._neighbor_diagnostic(
+                'allocate', nl, attempt=attempt,
+                extra_capacity=extra_capacity, overflow=overflow,
+            )
+            if not overflow:
                 return nl
             extra_capacity = max(8, 2 * extra_capacity)
         raise RuntimeError('Neighbor-list allocation overflowed after capacity growth')
@@ -148,6 +173,7 @@ class NVTStepper:
             raise RuntimeError('MD chunk started with an overflowing neighbor list')
         extra_capacity = max(8, int(nlist.idx.shape[-1]))
         for attempt in range(self.max_retries + 1):
+            self._neighbor_diagnostic('chunk_start', nlist, chunk=chunk, attempt=attempt)
             trial_state, trial_nlist, overflow = self.md_chunk(
                 state, nlist, chunk=int(chunk)
             )
@@ -157,6 +183,10 @@ class NVTStepper:
                 if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
                     raise FloatingPointError('Nonfinite momenta in accepted NVT chunk')
                 return trial_state, trial_nlist
+            self._neighbor_diagnostic(
+                'chunk_overflow', nlist, attempt=attempt,
+                extra_capacity=extra_capacity,
+            )
             if attempt == self.max_retries:
                 raise RuntimeError(
                     f'Neighbor-list overflow persisted after {self.max_retries} retries'
@@ -183,7 +213,9 @@ class NVTStepper:
             # Retain the updated classical FF for subsequent reaction checks.
             self.ff = outcome.ff
 
+        self._neighbor_diagnostic('reaction_sync_start')
         nlist = self.allocate_valid_nlist(outcome.positions)
+        self._neighbor_diagnostic('reaction_sync_allocated', nlist)
 
         if outcome.reinitialize_thermostat:
             if key is None:
