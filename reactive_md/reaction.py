@@ -7,6 +7,7 @@ from typing import Any
 import numpy as np
 import jax
 import jax.numpy as jnp
+from .performance import PerformanceTimer
 from .relaxation import langevin_relax_with_nlist
 
 from .reactions import lipf6
@@ -274,33 +275,35 @@ def maybe_react_one_event(
     if (md_energy_fn is None) != (md_neighbor_fn is None):
         raise ValueError("md_energy_fn and md_neighbor_fn must be provided together")
 
+    perf = PerformanceTimer()
     pf6_reacted_np = np.array(sys.pf6_reacted, dtype=bool)
 
-    candidates = reaction.find_candidates(
-        R,
-        ff.disp_fn,
-        pf6_reacted=pf6_reacted_np,
-    )
-    
-    if sys.pf6_li_partner is not None:
-        occupied = set(int(x) for x in np.asarray(sys.pf6_li_partner)[pf6_reacted_np] if x >= 0)
-        candidates = [c for c in candidates if c.li_idx not in occupied]
-    if allow_reverse and sys.pf6_leave_f is not None and sys.pf6_li_partner is not None:
-        reverse = reaction.find_reverse_candidates(
-            R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
-            pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
+    with perf.measure('candidate_search'):
+        candidates = reaction.find_candidates(
+            R,
+            ff.disp_fn,
+            pf6_reacted=pf6_reacted_np,
         )
-        # Choose one direction uniformly when both are available. This is
-        # an exploratory Metropolis proposal, not an MH-corrected sampler.
-        if reverse and candidates:
-            key, sub = jax.random.split(key)
-            candidates = reverse if bool(jax.random.bernoulli(sub)) else candidates
-        elif reverse:
-            candidates = reverse
-    candidate_records = candidate_records_from_reaction_candidates(
-        candidates,
-        top_n=candidate_log_top_n,
-    )
+    
+        if sys.pf6_li_partner is not None:
+            occupied = set(int(x) for x in np.asarray(sys.pf6_li_partner)[pf6_reacted_np] if x >= 0)
+            candidates = [c for c in candidates if c.li_idx not in occupied]
+        if allow_reverse and sys.pf6_leave_f is not None and sys.pf6_li_partner is not None:
+            reverse = reaction.find_reverse_candidates(
+                R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
+                pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
+            )
+            # Choose one direction uniformly when both are available. This is
+            # an exploratory Metropolis proposal, not an MH-corrected sampler.
+            if reverse and candidates:
+                key, sub = jax.random.split(key)
+                candidates = reverse if bool(jax.random.bernoulli(sub)) else candidates
+            elif reverse:
+                candidates = reverse
+        candidate_records = candidate_records_from_reaction_candidates(
+            candidates,
+            top_n=candidate_log_top_n,
+        )
 
     if not candidates:
         return key, False, ff, sys, {
@@ -346,15 +349,19 @@ def maybe_react_one_event(
          "candidate_records": candidate_records,
        }, R
 
-    if mc_energy_evaluator is None:
-        nlist_before = ff.neighbor_fn.update(R, ff.nlist)
-        E_before_arr = ff.energy_fn(R, nlist_before)["total"]
-        E_before_arr.block_until_ready()
-        E_before = float(E_before_arr)
-    else:
-        E_before = mc_energy_evaluator.energy(R)
+    with perf.measure('reaction_energy_before') as wait:
+        if mc_energy_evaluator is None:
+            nlist_before = ff.neighbor_fn.update(R, ff.nlist)
+            E_before_arr = ff.energy_fn(R, nlist_before)["total"]
+            E_before_arr.block_until_ready()
+            E_before = float(E_before_arr)
+        else:
+            E_before = mc_energy_evaluator.energy(R)
+        wait(E_before)
 
-    trial, _pf6_molid = reaction.build_trial(sys, cand)
+    with perf.measure('trial_topology') as wait:
+        trial, _pf6_molid = reaction.build_trial(sys, cand)
+        wait(trial)
 
     if trial is None:
         return key, False, ff, sys, {
@@ -368,40 +375,46 @@ def maybe_react_one_event(
             "candidate_records": candidate_records,
         }, R
 
-    ff_trial = build_trial_forcefield(R, box, trial, ff)
+    with perf.measure('trial_forcefield') as wait:
+        ff_trial = build_trial_forcefield(R, box, trial, ff)
+        wait(getattr(ff_trial, "nlist", None))
 
-    if cand.direction == "reverse":
-        R_probe = reaction.prepare_reverse_probe(
-            R, cand, disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+    with perf.measure('trial_probe') as wait:
+        if cand.direction == "reverse":
+            R_probe = reaction.prepare_reverse_probe(
+                R, cand, disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+            )
+        else:
+            R_probe = reaction.prepare_probe(
+                R, cand,
+                sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
+                sigma_f=float(trial["sigmas"][cand.leave_F]),
+                disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+            )
+
+        d_lif_after_probe = float(
+              jnp.linalg.norm(
+                  ff_trial.disp_fn(
+                  R_probe[cand.li_idx],
+                  R_probe[cand.leave_F],
+               )
+              )
         )
-    else:
-        R_probe = reaction.prepare_probe(
-            R, cand,
-            sigma_p=float(trial["sigmas"][reaction.phosphorus_index(cand)]),
-            sigma_f=float(trial["sigmas"][cand.leave_F]),
-            disp_fn=ff_trial.disp_fn, shift_fn=shift_fn,
+        wait(R_probe)
+
+    with perf.measure('trial_relaxation') as wait:
+        key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
+            key, R_probe,
+            jnp.zeros_like(R) if velocities is None else velocities,
+            ff=ff_trial, shift_fn=shift_fn,
+            masses=jnp.ones((len(R),)) if masses is None else masses,
+            temperature_k=temperature_k, kb_real=kb_real,
+            dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
+            thermostat_tau_ps=relaxation_tau_ps,
+            md_energy_fn=md_energy_fn,
+            md_neighbor_fn=md_neighbor_fn,
         )
-
-    d_lif_after_probe = float(
-          jnp.linalg.norm(
-              ff_trial.disp_fn(
-              R_probe[cand.li_idx],
-              R_probe[cand.leave_F],
-           )
-          )
-    )
-
-    key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
-        key, R_probe,
-        jnp.zeros_like(R) if velocities is None else velocities,
-        ff=ff_trial, shift_fn=shift_fn,
-        masses=jnp.ones((len(R),)) if masses is None else masses,
-        temperature_k=temperature_k, kb_real=kb_real,
-        dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
-        thermostat_tau_ps=relaxation_tau_ps,
-        md_energy_fn=md_energy_fn,
-        md_neighbor_fn=md_neighbor_fn,
-    )
+        wait(R_relaxed, v_relaxed, nlist_relaxed, key)
 
     if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
         return key, False, ff, sys, {
@@ -416,12 +429,14 @@ def maybe_react_one_event(
             "candidate_records": candidate_records,
         }, R
 
-    if mc_energy_evaluator is None:
-        E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
-        E_after_arr.block_until_ready()
-        E_after = float(E_after_arr)
-    else:
-        E_after = mc_energy_evaluator.energy(R_relaxed)
+    with perf.measure('reaction_energy_after') as wait:
+        if mc_energy_evaluator is None:
+            E_after_arr = ff_trial.energy_fn(R_relaxed, nlist_relaxed)["total"]
+            E_after_arr.block_until_ready()
+            E_after = float(E_after_arr)
+        else:
+            E_after = mc_energy_evaluator.energy(R_relaxed)
+        wait(E_after)
 
     dE = E_after - E_before
 
@@ -513,6 +528,7 @@ def maybe_react_rate_events(
     if (md_energy_fn is None) != (md_neighbor_fn is None):
         raise ValueError("md_energy_fn and md_neighbor_fn must be provided together")
 
+    perf = PerformanceTimer()
     pf6_reacted_np = np.asarray(
         sys.pf6_reacted,
         dtype=bool,
@@ -553,26 +569,27 @@ def maybe_react_rate_events(
     # Find all reaction candidates from the same reference geometry.
     # ---------------------------------------------------------
 
-    candidates = reaction.find_candidates(
-        R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
-    )
-    if reverse_rate_ps < 0.0 or not np.isfinite(reverse_rate_ps):
-        raise ValueError("reverse_rate_ps must be finite and nonnegative")
-    reverse_p_rate = float(reverse_rate_ps * reactive_interval_ps)
-    if reverse_p_rate > 1.0:
-        raise ValueError("Reverse linear rate probability exceeds 1")
-    if reverse_rate_ps > 0.0:
-        if sys.pf6_leave_f is None or sys.pf6_li_partner is None:
-            raise ValueError("Reverse rate requires partner state arrays")
-        candidates += reaction.find_reverse_candidates(
+    with perf.measure('candidate_search'):
+        candidates = reaction.find_candidates(
             R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
-            pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
         )
+        if reverse_rate_ps < 0.0 or not np.isfinite(reverse_rate_ps):
+            raise ValueError("reverse_rate_ps must be finite and nonnegative")
+        reverse_p_rate = float(reverse_rate_ps * reactive_interval_ps)
+        if reverse_p_rate > 1.0:
+            raise ValueError("Reverse linear rate probability exceeds 1")
+        if reverse_rate_ps > 0.0:
+            if sys.pf6_leave_f is None or sys.pf6_li_partner is None:
+                raise ValueError("Reverse rate requires partner state arrays")
+            candidates += reaction.find_reverse_candidates(
+                R, ff.disp_fn, pf6_reacted=pf6_reacted_np,
+                pf6_leave_f=sys.pf6_leave_f, pf6_li_partner=sys.pf6_li_partner,
+            )
 
-    candidate_records = candidate_records_from_reaction_candidates(
-        candidates,
-        top_n=candidate_log_top_n,
-    )
+        candidate_records = candidate_records_from_reaction_candidates(
+            candidates,
+            top_n=candidate_log_top_n,
+        )
 
     if not candidates:
         return key, False, ff, sys, {
@@ -669,20 +686,24 @@ def maybe_react_rate_events(
         # work.
         # -----------------------------------------------------
 
-        trial, _pf6_molid = reaction.build_trial(
-            sys_current,
-            cand,
-        )
+        with perf.measure('trial_topology') as wait:
+            trial, _pf6_molid = reaction.build_trial(
+                sys_current,
+                cand,
+            )
+            wait(trial)
 
         if trial is None:
             continue
 
-        ff_trial = build_trial_forcefield(
-            R,
-            box,
-            trial,
-            ff_current,
-        )
+        with perf.measure('trial_forcefield') as wait:
+            ff_trial = build_trial_forcefield(
+                R,
+                box,
+                trial,
+                ff_current,
+            )
+            wait(getattr(ff_trial, "nlist", None))
 
         pf6_reacted_np[cand.k_pf6] = cand.direction == "forward"
         used_li.add(cand.li_idx)
@@ -760,41 +781,45 @@ def maybe_react_rate_events(
 
     R_product = R
 
-    for cand, probe_parameters in zip(
-        accepted_candidates,
-        accepted_probe_parameters,
-    ):
-        sigma_p, sigma_f = probe_parameters
+    with perf.measure('trial_probe') as wait:
+        for cand, probe_parameters in zip(
+            accepted_candidates,
+            accepted_probe_parameters,
+        ):
+            sigma_p, sigma_f = probe_parameters
 
-        if cand.direction == "reverse":
-            R_probe_single = reaction.prepare_reverse_probe(
-                R, cand, disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
-            )
-        else:
-            R_probe_single = reaction.prepare_probe(
-                R, cand, sigma_p=sigma_p, sigma_f=sigma_f,
-                disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
-            )
+            if cand.direction == "reverse":
+                R_probe_single = reaction.prepare_reverse_probe(
+                    R, cand, disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
+                )
+            else:
+                R_probe_single = reaction.prepare_probe(
+                    R, cand, sigma_p=sigma_p, sigma_f=sigma_f,
+                    disp_fn=ff_current.disp_fn, shift_fn=shift_fn,
+                )
 
-        R_product = R_product.at[cand.leave_F].set(
-            R_probe_single[cand.leave_F]
-        )
+            R_product = R_product.at[cand.leave_F].set(
+                R_probe_single[cand.leave_F]
+            )
+        wait(R_product)
 
     # ---------------------------------------------------------
     # Single relaxation after all accepted topology changes.
     # ---------------------------------------------------------
 
-    key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
-        key, R_product,
-        jnp.zeros_like(R) if velocities is None else velocities,
-        ff=ff_current, shift_fn=shift_fn,
-        masses=jnp.ones((len(R),)) if masses is None else masses,
-        temperature_k=temperature_k, kb_real=kb_real,
-        dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
-        thermostat_tau_ps=relaxation_tau_ps,
-        md_energy_fn=md_energy_fn,
-        md_neighbor_fn=md_neighbor_fn,
-    )
+    with perf.measure('trial_relaxation') as wait:
+        key, R_relaxed, v_relaxed, nlist_relaxed = langevin_relax_with_nlist(
+            key, R_product,
+            jnp.zeros_like(R) if velocities is None else velocities,
+            ff=ff_current, shift_fn=shift_fn,
+            masses=jnp.ones((len(R),)) if masses is None else masses,
+            temperature_k=temperature_k, kb_real=kb_real,
+            dt_ps=relaxation_dt_ps, relaxation_time_ps=relaxation_time_ps,
+            thermostat_tau_ps=relaxation_tau_ps,
+            md_energy_fn=md_energy_fn,
+            md_neighbor_fn=md_neighbor_fn,
+        )
+        wait(R_relaxed, v_relaxed, nlist_relaxed, key)
 
     if not bool(jnp.all(jnp.isfinite(R_relaxed))) or not bool(jnp.all(jnp.isfinite(v_relaxed))):
         return key, False, ff, sys, {

@@ -189,3 +189,36 @@ def test_mc_reverse_restores_topology_and_bookkeeping(cycle, monkeypatch):
     for name in ('bonds', 'angles', 'torsions', 'impropers'):
         for actual, expected in zip(getattr(sys, name), getattr(original, name)):
             np.testing.assert_allclose(actual, expected, atol=1e-6)
+
+
+@pytest.mark.parametrize('sigma_mid,expected_stages', [
+    (1000., ['candidate_search']),
+    (-1000., ['candidate_search', 'reaction_energy_before', 'trial_topology',
+              'trial_forcefield', 'trial_probe', 'trial_relaxation',
+              'reaction_energy_after']),
+])
+def test_mc_performance_preserves_outcome(cycle, monkeypatch, capsys,
+                                          sigma_mid, expected_stages):
+    import json
+    from reactive_md.performance import PerformanceTimer
+
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '0')
+    baseline = cycle.run(sigma_mid=sigma_mid)
+    calls = [name for name, _ in cycle.calls]
+    cycle.calls.clear()
+    assert '[REACTIVE_MD PERF]' not in capsys.readouterr().out
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '1')
+    with PerformanceTimer().measure('reaction_attempt', 100):
+        measured = cycle.run(sigma_mid=sigma_mid)
+    prefix = '[REACTIVE_MD PERF] '
+    rows = [json.loads(line[len(prefix):]) for line in capsys.readouterr().out.splitlines()
+            if line.startswith(prefix)]
+    assert [r['stage'] for r in rows] == expected_stages + ['reaction_attempt']
+    assert all(r['step'] == 100 and r['status'] == 'ok' for r in rows)
+    assert all(r['parent_id'] == rows[-1]['span_id'] for r in rows[:-1])
+    assert [name for name, _ in cycle.calls] == calls
+    assert baseline[1] == measured[1]
+    np.testing.assert_array_equal(baseline[0], measured[0])
+    np.testing.assert_array_equal(baseline[-1], measured[-1])
+    np.testing.assert_array_equal(baseline[3].pf6_reacted, measured[3].pf6_reacted)
+    assert baseline[4]['p_total'] == measured[4]['p_total']

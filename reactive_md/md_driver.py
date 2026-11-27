@@ -20,6 +20,7 @@ from .engine import (
     MDObservation, MDObserver, MDRunResult, NVTStepper,
 )
 from .md_units import md_unit_factors
+from .performance import PerformanceTimer
 
 
 if TYPE_CHECKING:
@@ -197,6 +198,7 @@ def run_md_nvt(
     if box is not None:
         box = jnp.asarray(box, dtype=float_dtype)
 
+    perf = PerformanceTimer()
     metadata = _restart_metadata(cfg, box, masses, float_dtype)
     if mace_md:
         metadata["md_backend_id"] = md_backend_id
@@ -205,74 +207,76 @@ def run_md_nvt(
     relaxation_elapsed = 0.0
     active_energy_offset = energy_offset
 
-    if restart_path is not None:
-        from .checkpoint import load_checkpoint
+    with perf.measure('md_initialize_or_restore') as wait:
+        if restart_path is not None:
+            from .checkpoint import load_checkpoint
 
-        saved = load_checkpoint(restart_path)
-        _validate_restart_metadata(saved['metadata'], metadata)
-        steps_done = int(saved['steps_done'])
-        if steps_done > int(cfg.steps):
-            raise ValueError('Checkpoint is beyond requested total cfg.steps')
-        accepted_events = int(saved['accepted_events'])
-        # A final short chunk has already performed a reaction check. Extending
-        # from it would shift the reaction schedule relative to an uninterrupted
-        # run, and the pre-check state is not available in this checkpoint.
-        if (steps_done < int(cfg.steps)
-                and accepted_events < int(cfg.max_events)
-                and steps_done % int(cfg.check_every) != 0):
-            raise ValueError(
-                'Cannot extend a checkpoint at a nonaligned reaction boundary; '
-                'restart from an earlier aligned checkpoint'
+            saved = load_checkpoint(restart_path)
+            _validate_restart_metadata(saved['metadata'], metadata)
+            steps_done = int(saved['steps_done'])
+            if steps_done > int(cfg.steps):
+                raise ValueError('Checkpoint is beyond requested total cfg.steps')
+            accepted_events = int(saved['accepted_events'])
+            # A final short chunk has already performed a reaction check. Extending
+            # from it would shift the reaction schedule relative to an uninterrupted
+            # run, and the pre-check state is not available in this checkpoint.
+            if (steps_done < int(cfg.steps)
+                    and accepted_events < int(cfg.max_events)
+                    and steps_done % int(cfg.check_every) != 0):
+                raise ValueError(
+                    'Cannot extend a checkpoint at a nonaligned reaction boundary; '
+                    'restart from an earlier aligned checkpoint'
+                )
+            relaxation_elapsed = float(saved['relaxation_elapsed_ps'])
+            key = saved['key']
+            state = saved['md_state']
+            # Never silently cast a restored thermostat/MD state: doing so would
+            # invalidate a strict continuation and could change the trajectory.
+            if np.dtype(state.position.dtype) != np.dtype(float_dtype):
+                raise ValueError(
+                    f'Checkpoint position dtype {state.position.dtype} does not '
+                    f'match requested {np.dtype(float_dtype).name}'
+                )
+            sys = type(sys)(**saved['system_state'])
+            active_energy_offset = saved['energy_offset']
+            ff = _rebuild_forcefield(
+                state, sys, saved['forcefield_options'], active_energy_offset, box
             )
-        relaxation_elapsed = float(saved['relaxation_elapsed_ps'])
-        key = saved['key']
-        state = saved['md_state']
-        # Never silently cast a restored thermostat/MD state: doing so would
-        # invalidate a strict continuation and could change the trajectory.
-        if np.dtype(state.position.dtype) != np.dtype(float_dtype):
-            raise ValueError(
-                f'Checkpoint position dtype {state.position.dtype} does not '
-                f'match requested {np.dtype(float_dtype).name}'
-            )
-        sys = type(sys)(**saved['system_state'])
-        active_energy_offset = saved['energy_offset']
-        ff = _rebuild_forcefield(
-            state, sys, saved['forcefield_options'], active_energy_offset, box
-        )
-        # Do not call initialize(): that would reset Nose-Hoover variables.
-        stepper = NVTStepper(
-                cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
-                **(
-                    {
-                        "md_energy_fn": md_energy_fn,
-                        "md_neighbor_fn": md_neighbor_fn,
-                    }
-                    if mace_md else {}
-                ),
-            )
-        if mace_md:
-            # Rebuild both lists independently; retain the saved cached force
-            # and thermostat state rather than reinitializing the integrator.
-            _allocate_classical_reaction_list(ff, state.position)
-            md_nlist = stepper.allocate_valid_nlist(state.position)
-            stepper.nlist = md_nlist
+            # Do not call initialize(): that would reset Nose-Hoover variables.
+            stepper = NVTStepper(
+                    cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
+                    **(
+                        {
+                            "md_energy_fn": md_energy_fn,
+                            "md_neighbor_fn": md_neighbor_fn,
+                        }
+                        if mace_md else {}
+                    ),
+                )
+            if mace_md:
+                # Rebuild both lists independently; retain the saved cached force
+                # and thermostat state rather than reinitializing the integrator.
+                _allocate_classical_reaction_list(ff, state.position)
+                md_nlist = stepper.allocate_valid_nlist(state.position)
+                stepper.nlist = md_nlist
+            else:
+                md_nlist = ff.nlist
+            _restore_observers(observers, saved['observer_state'])
         else:
-            md_nlist = ff.nlist
-        _restore_observers(observers, saved['observer_state'])
-    else:
-        stepper = NVTStepper(
-                cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
-                **(
-                    {
-                        "md_energy_fn": md_energy_fn,
-                        "md_neighbor_fn": md_neighbor_fn,
-                    }
-                    if mace_md else {}
-                ),
-            )
-        key, sub = jax.random.split(key)
-        state = stepper.initialize(sub, init_positions)
-        md_nlist = getattr(stepper, "nlist", ff.nlist)
+            stepper = NVTStepper(
+                    cfg=cfg, ff=ff, shift_fn=shift_fn, masses=masses,
+                    **(
+                        {
+                            "md_energy_fn": md_energy_fn,
+                            "md_neighbor_fn": md_neighbor_fn,
+                        }
+                        if mace_md else {}
+                    ),
+                )
+            key, sub = jax.random.split(key)
+            state = stepper.initialize(sub, init_positions)
+            md_nlist = getattr(stepper, "nlist", ff.nlist)
+        wait(state, md_nlist, key)
 
     def notify(outcome=None, pre_positions=None):
         observation = MDObservation(
@@ -293,34 +297,38 @@ def run_md_nvt(
             return
         from .checkpoint import save_checkpoint
 
-        options = ff.nb_options
-        save_checkpoint(
-            checkpoint_path,
-            md_state=state,
-            system_state=sys,
-            key=key,
-            steps_done=steps_done,
-            accepted_events=accepted_events,
-            relaxation_elapsed_ps=relaxation_elapsed,
-            observer_state=_observer_checkpoint_state(observers),
-            forcefield_options={
-                'r_cut': float(options.r_cut),
-                'dr_threshold': float(options.dr_threshold),
-                'use_shift_lj': getattr(options, 'use_shift_lj', None),
-            },
-            energy_offset=active_energy_offset,
-            metadata=metadata,
-        )
+        with perf.measure('checkpoint', steps_done):
+            options = ff.nb_options
+            save_checkpoint(
+                checkpoint_path,
+                md_state=state,
+                system_state=sys,
+                key=key,
+                steps_done=steps_done,
+                accepted_events=accepted_events,
+                relaxation_elapsed_ps=relaxation_elapsed,
+                observer_state=_observer_checkpoint_state(observers),
+                forcefield_options={
+                    'r_cut': float(options.r_cut),
+                    'dr_threshold': float(options.dr_threshold),
+                    'use_shift_lj': getattr(options, 'use_shift_lj', None),
+                },
+                energy_offset=active_energy_offset,
+                metadata=metadata,
+            )
 
     if restart_path is None:
-        notify()
+        with perf.measure('initial_observers', steps_done):
+            notify()
     # On restart, the saved step has already been emitted. Do not duplicate it.
     while steps_done < cfg.steps and accepted_events < cfg.max_events:
         chunk = min(int(cfg.check_every), int(cfg.steps - steps_done))
 
-        state, md_nlist = stepper.advance(
-            state, md_nlist, chunk=chunk
-        )
+        with perf.measure('md_chunk', steps_done + chunk, chunk_steps=chunk) as wait:
+            state, md_nlist = stepper.advance(
+                state, md_nlist, chunk=chunk
+            )
+            wait(state, md_nlist)
 
         steps_done += chunk
 
@@ -328,7 +336,9 @@ def run_md_nvt(
             # Reaction code still uses the classical force-field object.
             # Its neighbor list must be valid at the current MACE-MD positions,
             # and must never be replaced by the MACE neighbor list.
-            _allocate_classical_reaction_list(ff, state.position)
+            with perf.measure('classical_neighbor_list', steps_done) as wait:
+                _allocate_classical_reaction_list(ff, state.position)
+                wait(ff.nlist)
         else:
             # Preserve the existing classical MD neighbor-list behavior.
             ff.nlist = md_nlist
@@ -348,26 +358,29 @@ def run_md_nvt(
             outcome=None,
             pre_reaction_positions=before,
         )
-        for observer in observers:
-            before_callback = getattr(observer, 'on_before_reaction', None)
-            if before_callback is not None:
-                before_callback(before_observation)
+        with perf.measure('before_reaction_observers', steps_done):
+            for observer in observers:
+                before_callback = getattr(observer, 'on_before_reaction', None)
+                if before_callback is not None:
+                    before_callback(before_observation)
 
         _, kb_md = md_unit_factors(cfg.md_unit_system)        
-        outcome = reaction_handler.attempt(ReactionContext(
-            key=key,
-            step=steps_done,
-            interval_ps=chunk * float(cfg.dt),
-            positions=state.position,
-            velocities=state.velocity,
-            system=sys,
-            ff=ff,
-            box=box,
-            shift_fn=shift_fn,
-            masses=stepper.mass,
-            temperature_k=cfg.temperature_k,
-            kb_real=kb_md,
-        ))
+        with perf.measure('reaction_attempt', steps_done) as wait:
+            outcome = reaction_handler.attempt(ReactionContext(
+                key=key,
+                step=steps_done,
+                interval_ps=chunk * float(cfg.dt),
+                positions=state.position,
+                velocities=state.velocity,
+                system=sys,
+                ff=ff,
+                box=box,
+                shift_fn=shift_fn,
+                masses=stepper.mass,
+                temperature_k=cfg.temperature_k,
+                kb_real=kb_md,
+            ))
+            wait(outcome.key, outcome.positions, outcome.velocities)
         key = outcome.key
         if outcome.events:
             accepted_events += len(outcome.events)
@@ -378,11 +391,14 @@ def run_md_nvt(
                 key, sub = jax.random.split(key)
             else:
                 sub = None
-            state, md_nlist = stepper.synchronize(state, outcome, key=sub)
+            with perf.measure('reaction_sync', steps_done) as wait:
+                state, md_nlist = stepper.synchronize(state, outcome, key=sub)
+                wait(state, md_nlist)
             if not mace_md:
                 ff.nlist = md_nlist
             relaxation_elapsed += float(outcome.relaxation_time_ps)
-        notify(outcome, before)
+        with perf.measure('after_reaction_observers', steps_done):
+            notify(outcome, before)
         if (checkpoint_every_steps is not None
                 and steps_done % checkpoint_every_steps == 0):
             save_now()

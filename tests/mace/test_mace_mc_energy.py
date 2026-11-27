@@ -92,3 +92,27 @@ def test_mace_mc_uses_updated_neighbors_and_current_positions():
     assert first == pytest.approx(22.)
     assert second == pytest.approx(40.)
     assert neighbor_fn.capacities == [2, 8, 2, 8]
+
+
+def test_mace_mc_performance_preserves_energy(monkeypatch, capsys):
+    import json
+    from reactive_md.performance import PerformanceTimer
+
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '1')
+    neighbors = FakeNeighborFunction()
+    evaluator = MaceJaxEnergyEvaluator(
+        neighbor_fn=neighbors, make_energy_fn=make_energy_fn,
+        box0=jnp.array([10., 10., 10.]),
+    )
+    with PerformanceTimer().measure('reaction_energy_before', 20):
+        energy = evaluator.energy(jnp.array([[1., 2., 3.]]))
+    assert energy == pytest.approx(14.) and neighbors.capacities == [2, 8]
+    prefix = '[REACTIVE_MD PERF] '
+    rows = [json.loads(line[len(prefix):]) for line in capsys.readouterr().out.splitlines()
+            if line.startswith(prefix)]
+    assert [r['stage'] for r in rows] == [
+        'mace_mc_neighbor_allocate', 'mace_mc_neighbor_allocate',
+        'mace_mc_energy_kernel', 'reaction_energy_before']
+    assert all(r['step'] == 20 for r in rows)
+    assert all(r['parent_id'] == rows[-1]['span_id'] for r in rows[:-1])
+    assert [r['extra_capacity'] for r in rows[:2]] == [2, 8]

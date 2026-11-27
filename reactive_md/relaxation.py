@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax_md import simulate
+from .performance import PerformanceTimer
 
 
 # Short chunks limit how much work must be replayed after an overflow.
@@ -53,6 +54,7 @@ def langevin_relax_with_nlist(
         raise ValueError(
             "md_energy_fn and md_neighbor_fn must be provided together"
         )
+    perf = PerformanceTimer()
     neighbor_fn = md_neighbor_fn if md_neighbor_fn is not None else ff.neighbor_fn
 
     dt_ps = float(dt_ps)
@@ -114,9 +116,13 @@ def langevin_relax_with_nlist(
     def allocate_valid_nlist(positions, *, extra_capacity=0):
         """Allocate outside JIT; grow storage until no overflow is reported."""
         for attempt in range(_MAX_NLIST_RETRIES + 1):
-            nl = neighbor_fn.allocate(
-                positions, extra_capacity=extra_capacity
-            )
+            with perf.measure(
+                'langevin_neighbor_allocate', attempt=attempt, extra_capacity=extra_capacity,
+            ) as wait:
+                nl = neighbor_fn.allocate(
+                    positions, extra_capacity=extra_capacity
+                )
+                wait(nl)
             if not bool(np.asarray(nl.did_buffer_overflow)):
                 return nl
             if attempt == _MAX_NLIST_RETRIES:
@@ -129,13 +135,15 @@ def langevin_relax_with_nlist(
 
     # A valid list is required before the Langevin initializer computes its
     # initial force. Do not initialize with an overflowing list.
-    nlist = allocate_valid_nlist(R)
-    key, sub = jax.random.split(key)
-    state = init_fn(sub, R, mass=mass, neighbor=nlist)
-    state = replace(
-        state,
-        momentum=velocities * mass[:, None],
-    )
+    with perf.measure('langevin_initialize') as wait:
+        nlist = allocate_valid_nlist(R)
+        key, sub = jax.random.split(key)
+        state = init_fn(sub, R, mass=mass, neighbor=nlist)
+        state = replace(
+            state,
+            momentum=velocities * mass[:, None],
+        )
+        wait(state, nlist, key)
 
     @partial(jax.jit, static_argnames=("chunk",))
     def run_chunk(state, nlist, *, chunk):
@@ -174,9 +182,13 @@ def langevin_relax_with_nlist(
 
         extra_capacity = 8
         for attempt in range(_MAX_NLIST_RETRIES + 1):
-            trial_state, trial_nlist, overflow_seen = run_chunk(
-                state, nlist, chunk=chunk
-            )
+            with perf.measure(
+                'langevin_chunk_attempt', attempt=attempt, chunk_steps=chunk,
+            ) as wait:
+                trial_state, trial_nlist, overflow_seen = run_chunk(
+                    state, nlist, chunk=chunk
+                )
+                wait(trial_state, trial_nlist, overflow_seen)
             if not bool(np.asarray(overflow_seen)):
                 # Only a fully validated chunk is accepted.
                 if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
@@ -197,25 +209,33 @@ def langevin_relax_with_nlist(
 
             # Discard trial_state AND its advanced Langevin RNG. Rebuild at
             # the last accepted coordinates, then retry the identical chunk.
-            nlist = allocate_valid_nlist(
-                state.position, extra_capacity=extra_capacity
-            )
-            extra_capacity *= 2
-
-            # JAX-MD Langevin carries a cached force. Recompute it against
-            # the replacement list before replaying the chunk.
-            if hasattr(state, "force"):
-                state = replace(
-                    state,
-                    force=force_fn(state.position, nlist),
+            with perf.measure(
+                'langevin_overflow_recovery', attempt=attempt, chunk_steps=chunk,
+            ) as wait:
+                nlist = allocate_valid_nlist(
+                    state.position, extra_capacity=extra_capacity
                 )
+                extra_capacity *= 2
+
+                # JAX-MD Langevin carries a cached force. Recompute it against
+                # the replacement list before replaying the chunk.
+                if hasattr(state, "force"):
+                    state = replace(
+                        state,
+                        force=force_fn(state.position, nlist),
+                    )
+                wait(state, nlist)
 
         raise AssertionError("Unreachable Langevin recovery state")
 
     steps_done = 0
     while steps_done < n_steps:
         chunk = min(_RELAXATION_CHUNK_STEPS, n_steps - steps_done)
-        state, nlist = advance_chunk(state, nlist, chunk=chunk)
+        with perf.measure(
+            'langevin_chunk', chunk_steps=chunk, relaxation_step=steps_done + chunk,
+        ) as wait:
+            state, nlist = advance_chunk(state, nlist, chunk=chunk)
+            wait(state, nlist)
         steps_done += chunk
 
     return (

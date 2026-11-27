@@ -150,3 +150,25 @@ def test_invalid_relaxation_parameters_fail_before_allocation(options, message):
     with pytest.raises(ValueError, match=message):
         run_relaxation(neighbors, **options)
     assert neighbors.allocations == []
+
+
+def test_relaxation_performance_preserves_retry_and_state(monkeypatch, capsys):
+    import json
+    from reactive_md.performance import PerformanceTimer
+
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '0')
+    baseline = run_relaxation(NeighborFunction(overflow_after=2))
+    assert '[REACTIVE_MD PERF]' not in capsys.readouterr().out
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '1')
+    with PerformanceTimer().measure('trial_relaxation', 10):
+        measured = run_relaxation(NeighborFunction(overflow_after=2))
+    prefix = '[REACTIVE_MD PERF] '
+    rows = [json.loads(line[len(prefix):]) for line in capsys.readouterr().out.splitlines()
+            if line.startswith(prefix)]
+    np.testing.assert_array_equal(measured[0], baseline[0])
+    for actual, expected in zip(measured[1:3], baseline[1:3]):
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-7)
+    assert all(r['step'] == 10 and r['status'] == 'ok' for r in rows)
+    assert [r['attempt'] for r in rows if r['stage'] == 'langevin_chunk_attempt'] == [0, 1]
+    assert sum(r['stage'] == 'langevin_overflow_recovery' for r in rows) == 1
+    assert [r['chunk_steps'] for r in rows if r['stage'] == 'langevin_chunk'] == [2]

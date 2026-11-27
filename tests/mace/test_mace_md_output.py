@@ -152,3 +152,25 @@ def test_lipf6_wrapper_keeps_observer_with_mace(monkeypatch):
     assert isinstance(observer, LiPF6OutputObserver)
     assert observer.md_energy_fn is md_energy_fn
     assert observer.md_neighbor_fn is md_neighbor_fn
+
+
+def test_observer_performance_preserves_energy_and_retry(monkeypatch, capsys):
+    import json
+    from reactive_md.performance import PerformanceTimer
+
+    monkeypatch.setenv('REACTIVE_MD_PERFORMANCE', '1')
+    neighbor_fn = FakeNeighborFunction()
+    observer = make_observer(neighbor_fn)
+    with PerformanceTimer().measure('before_reaction_observers', 1):
+        observer.on_before_reaction(make_observation())
+    out = capsys.readouterr().out
+    assert 'PE= 7.000000' in out and neighbor_fn.capacities == [2, 8]
+    prefix = '[REACTIVE_MD PERF] '
+    rows = [json.loads(line[len(prefix):]) for line in out.splitlines()
+            if line.startswith(prefix)]
+    assert [r['stage'] for r in rows] == [
+        'observer_unwrap', 'observer_mace_neighbor_allocate',
+        'observer_mace_neighbor_allocate', 'observer_potential_energy',
+        'observer_kinetic_energy', 'before_reaction_observers']
+    assert all(r['step'] == 1 for r in rows)
+    assert all(r['parent_id'] == rows[3]['span_id'] for r in rows[1:3])

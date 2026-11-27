@@ -170,6 +170,8 @@ Checkpoint/restart is implemented for all five LiPF6 simulation modes, including
 
 MACE-MD checkpoints validate a backend fingerprint and reconstruct both neighbor lists. Regression tests use a differentiable surrogate rather than foundation-model weights. Actual MACE-MP `small-0b2` restart checks have also passed on the LiPF6 benchmark described below. Verify equivalence for your own model, system and software stack before relying on this feature for production.
 
+Optional performance profiling is available with `REACTIVE_MD_PERFORMANCE=1`. For nested MD, reaction, MACE energy, relaxation and I/O timings, and instructions for analyzing the logs, see [Performance profiling](validation/PERFORMANCE_PROFILING.md). Existing MACE neighbor-list diagnostics can be enabled independently with `REACTIVE_MD_NLIST_DIAGNOSTICS=1`.
+
 Run the repository tests with:
 
 ```bash

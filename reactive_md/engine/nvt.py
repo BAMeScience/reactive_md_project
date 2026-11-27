@@ -14,6 +14,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from ..config import SimConfig
+from ..performance import PerformanceTimer
 from .contracts import ReactionOutcome
 from ..md_units import md_unit_factors
 
@@ -135,11 +136,16 @@ class NVTStepper:
         ), flush=True)
 
     def allocate_valid_nlist(self, positions, *, extra_capacity=0, min_capacity=0):
+        perf = PerformanceTimer()
         for attempt in range(self.max_retries + 1):
-            nl = self.neighbor_fn.allocate(
-                positions, extra_capacity=extra_capacity
-            )
-            overflow = bool(np.asarray(nl.did_buffer_overflow))
+            with perf.measure(
+                'nvt_neighbor_allocate', attempt=attempt, extra_capacity=extra_capacity,
+            ) as wait:
+                nl = self.neighbor_fn.allocate(
+                    positions, extra_capacity=extra_capacity
+                )
+                overflow = bool(np.asarray(nl.did_buffer_overflow))
+                wait(nl)
             self._neighbor_diagnostic(
                 'allocate', nl, attempt=attempt,
                 extra_capacity=extra_capacity, overflow=overflow,
@@ -185,13 +191,16 @@ class NVTStepper:
     def advance(self, state, nlist, *, chunk):
         if bool(np.asarray(nlist.did_buffer_overflow)):
             raise RuntimeError('MD chunk started with an overflowing neighbor list')
+        perf = PerformanceTimer()
         mace_md = getattr(self, 'md_energy_fn', None) is not None
         extra_capacity = max(8, int(nlist.idx.shape[-1]))
         for attempt in range(self.max_retries + 1):
             self._neighbor_diagnostic('chunk_start', nlist, chunk=chunk, attempt=attempt)
-            trial_state, trial_nlist, overflow = self.md_chunk(
-                state, nlist, chunk=int(chunk)
-            )
+            with perf.measure('nvt_chunk_attempt', attempt=attempt, chunk_steps=chunk) as wait:
+                trial_state, trial_nlist, overflow = self.md_chunk(
+                    state, nlist, chunk=int(chunk)
+                )
+                wait(trial_state, trial_nlist, overflow)
             if not bool(np.asarray(overflow)):
                 if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.position)))):
                     raise FloatingPointError('Nonfinite positions in accepted NVT chunk')
@@ -210,17 +219,21 @@ class NVTStepper:
                 raise RuntimeError(
                     f'Neighbor-list overflow persisted after {self.max_retries} retries'
                 )
-            if mace_md:
-                nlist = self.allocate_valid_nlist(
-                    state.position, extra_capacity=extra_capacity,
-                    min_capacity=width + extra_capacity,
-                )
-            else:
-                nlist = self.allocate_valid_nlist(
-                    state.position, extra_capacity=extra_capacity
-                )
-                extra_capacity *= 2
-            state = self.refresh_force(state, nlist)
+            with perf.measure(
+                'nvt_overflow_recovery', attempt=attempt, chunk_steps=chunk,
+            ) as wait:
+                if mace_md:
+                    nlist = self.allocate_valid_nlist(
+                        state.position, extra_capacity=extra_capacity,
+                        min_capacity=width + extra_capacity,
+                    )
+                else:
+                    nlist = self.allocate_valid_nlist(
+                        state.position, extra_capacity=extra_capacity
+                    )
+                    extra_capacity *= 2
+                state = self.refresh_force(state, nlist)
+                wait(state, nlist)
         raise AssertionError('Unreachable neighbor-list recovery state')
 
     def synchronize(self, state, outcome: ReactionOutcome, *, key=None):

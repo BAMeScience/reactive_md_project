@@ -9,9 +9,11 @@ from reactive_md.reaction import SystemState, maybe_react_rate_events
 from reactive_md.reactions import lipf6
 
 
-def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
+@pytest.mark.parametrize("profiling", ["0", "1"])
+def test_rate_mode_multiple_events_relaxes_once(monkeypatch, capsys, profiling):
     """A rate sweep may accept several events but must relax only once."""
 
+    monkeypatch.setenv("REACTIVE_MD_PERFORMANCE", profiling)
     candidates = [
         lipf6.ReactionCandidate(
             k_pf6=0,
@@ -269,3 +271,15 @@ def test_rate_mode_multiple_events_relaxes_once(monkeypatch):
 
     assert ff_new is built_forcefields[-1]
     assert ff_new.nlist == {"final": True}
+
+    import json
+    prefix = '[REACTIVE_MD PERF] '
+    stages = [json.loads(line[len(prefix):])['stage']
+              for line in capsys.readouterr().out.splitlines()
+              if line.startswith(prefix)]
+    if profiling == '1':
+        assert stages == ['candidate_search', 'trial_topology', 'trial_forcefield',
+                          'trial_topology', 'trial_forcefield', 'trial_probe',
+                          'trial_relaxation']
+    else:
+        assert stages == []

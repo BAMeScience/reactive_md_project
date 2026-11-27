@@ -10,6 +10,8 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from ..performance import PerformanceTimer
+
 def _write_dump_frame_if_requested(
     *,
     dump_file,
@@ -345,40 +347,53 @@ class LiPF6OutputObserver:
             self.previous_position = positions
 
     def _dump(self, step, positions):
-        _write_dump_frame_if_requested(
-            dump_file=self.dump_file, dump_writer=self.dump_writer,
-            step=step, box=self.box, atom_ids=self.atom_ids,
-            atom_types=self.atom_types, masses=self.masses,
-            wrapped_positions=positions, unwrapped_positions=self.unwrapped_position,
-        )
+        perf = PerformanceTimer()
+        with perf.measure(
+            'trajectory_dump', step, requested=self.dump_file is not None and self.dump_writer is not None,
+        ):
+            _write_dump_frame_if_requested(
+                dump_file=self.dump_file, dump_writer=self.dump_writer,
+                step=step, box=self.box, atom_ids=self.atom_ids,
+                atom_types=self.atom_types, masses=self.masses,
+                wrapped_positions=positions, unwrapped_positions=self.unwrapped_position,
+            )
 
     def on_before_reaction(self, observation):
         """Called after the MD chunk, before chemistry changes the topology."""
+        perf = PerformanceTimer()
         state = observation.state
         self.disp_fn = observation.ff.disp_fn
-        self._unwrap_to(state.position)
-        if self.md_energy_fn is None:
-            energy = observation.ff.energy_fn(
-                state.position, observation.ff.nlist
-            )['total']
-        else:
-            extra_capacity = 2
-            for _ in range(13):
-                neighbors = self.md_neighbor_fn.allocate(
-                    state.position, extra_capacity=extra_capacity
-                )
-                neighbors = neighbors.update(state.position)
-                if not bool(jnp.asarray(neighbors.did_buffer_overflow)):
-                    break
-                extra_capacity = max(8, 2 * extra_capacity)
+        with perf.measure('observer_unwrap', observation.step) as wait:
+            self._unwrap_to(state.position)
+            wait(self.previous_position, self.unwrapped_position)
+        with perf.measure('observer_potential_energy', step=observation.step):
+            if self.md_energy_fn is None:
+                energy = observation.ff.energy_fn(
+                    state.position, observation.ff.nlist
+                )['total']
             else:
-                raise RuntimeError(
-                    "MACE observer neighbor-list allocation overflowed"
-                )
-            energy = self._compiled_md_energy(state.position, neighbors)
-        energy.block_until_ready()
-        kinetic = 0.5 * jnp.sum(self.masses[:, None] * state.velocity ** 2)
-        kinetic.block_until_ready()
+                extra_capacity = 2
+                for attempt in range(13):
+                    with perf.measure(
+                        'observer_mace_neighbor_allocate', attempt=attempt, extra_capacity=extra_capacity,
+                    ) as wait:
+                        neighbors = self.md_neighbor_fn.allocate(
+                            state.position, extra_capacity=extra_capacity
+                        )
+                        neighbors = neighbors.update(state.position)
+                        wait(neighbors)
+                    if not bool(jnp.asarray(neighbors.did_buffer_overflow)):
+                        break
+                    extra_capacity = max(8, 2 * extra_capacity)
+                else:
+                    raise RuntimeError(
+                        "MACE observer neighbor-list allocation overflowed"
+                    )
+                energy = self._compiled_md_energy(state.position, neighbors)
+            energy.block_until_ready()
+        with perf.measure('observer_kinetic_energy', step=observation.step):
+            kinetic = 0.5 * jnp.sum(self.masses[:, None] * state.velocity ** 2)
+            kinetic.block_until_ready()
         self.pre_reacted_count = int(jnp.sum(observation.system.pf6_reacted))
         print(f'[step {observation.step:6d}] PE={float(energy): .6f} '
               f'KE={float(kinetic): .6f} reacted={self.pre_reacted_count}')
