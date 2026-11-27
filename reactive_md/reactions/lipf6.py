@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import jax
 import jax.numpy as jnp
 import numpy as np
 
@@ -575,42 +576,53 @@ def find_reaction_candidates(
             "molecule."
         )
 
+    k_open = np.flatnonzero(~pf6_reacted_np)
+    if not k_open.size or not li_atoms_np.size:
+        return []
+
     Rj = jnp.asarray(R)
+    rows = pf6_atoms_np[k_open]
+    p_idx = rows[:, 0]
+    f_idx = rows[:, 1:]
+    # Batch displacement calls and transfer each block to the host once.
+    # Keep the original scalar NumPy norm (including its dtype/reduction)
+    # and Python stable sort to minimize numerical and tie-order changes.
+    pf_disp = jax.vmap(jax.vmap(disp_fn, (None, 0)))
+    lif_disp = jax.vmap(jax.vmap(disp_fn, (None, 0)), (0, None))
+    try:
+        pf_vectors = np.asarray(pf_disp(Rj[p_idx], Rj[f_idx]))
+        lif_vectors = np.asarray(
+            lif_disp(Rj[li_atoms_np], Rj[f_idx.reshape(-1)])
+        ).reshape((li_atoms_np.size, k_open.size, 6, -1))
+    except (jax.errors.TracerArrayConversionError,
+            jax.errors.TracerBoolConversionError,
+            jax.errors.ConcretizationTypeError):
+        # Compatibility with host-only displacement callbacks that cannot
+        # be transformed by vmap. Never catch device allocation failures.
+        pf_vectors = np.asarray([
+            [np.asarray(disp_fn(Rj[int(p)], Rj[int(f)])) for f in fs]
+            for p, fs in zip(p_idx, f_idx)
+        ])
+        lif_vectors = np.asarray([
+            [[np.asarray(disp_fn(Rj[int(li)], Rj[int(f)])) for f in fs]
+             for fs in f_idx]
+            for li in li_atoms_np
+        ])
+
     candidates: list[ReactionCandidate] = []
-
-    for k_pf6 in range(pf6_atoms_np.shape[0]):
-        if pf6_reacted_np[k_pf6]:
-            continue
-
-        phosphorus = int(pf6_atoms_np[k_pf6, 0])
-        fluorines = pf6_atoms_np[k_pf6, 1:]
-
-        for li_atom in li_atoms_np:
-            li_idx = int(li_atom)
-
-            for fluorine in fluorines:
-                fluorine_idx = int(fluorine)
-
-                d_lif = _distance(
-                    disp_fn,
-                    Rj,
-                    li_idx,
-                    fluorine_idx,
-                )
-                d_pf = _distance(
-                    disp_fn,
-                    Rj,
-                    phosphorus,
-                    fluorine_idx,
-                )
-
+    for k_local, k_pf6 in enumerate(k_open):
+        d_pf = [float(np.linalg.norm(v)) for v in pf_vectors[k_local]]
+        for li_local, li_atom in enumerate(li_atoms_np):
+            for f_local, fluorine in enumerate(f_idx[k_local]):
                 candidates.append(
                     ReactionCandidate(
                         k_pf6=int(k_pf6),
-                        li_idx=li_idx,
-                        leave_F=fluorine_idx,
-                        d_lif=d_lif,
-                        d_pf=d_pf,
+                        li_idx=int(li_atom),
+                        leave_F=int(fluorine),
+                        d_lif=float(np.linalg.norm(
+                            lif_vectors[li_local, k_local, f_local]
+                        )),
+                        d_pf=d_pf[f_local],
                     )
                 )
 
