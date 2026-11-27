@@ -134,7 +134,7 @@ class NVTStepper:
             f'{key}={value}' for key, value in details.items()
         ), flush=True)
 
-    def allocate_valid_nlist(self, positions, *, extra_capacity=0):
+    def allocate_valid_nlist(self, positions, *, extra_capacity=0, min_capacity=0):
         for attempt in range(self.max_retries + 1):
             nl = self.neighbor_fn.allocate(
                 positions, extra_capacity=extra_capacity
@@ -144,9 +144,23 @@ class NVTStepper:
                 'allocate', nl, attempt=attempt,
                 extra_capacity=extra_capacity, overflow=overflow,
             )
-            if not overflow:
+            width = int(nl.idx.shape[-1]) if min_capacity else 0
+            if not overflow and width >= min_capacity:
                 return nl
-            extra_capacity = max(8, 2 * extra_capacity)
+            if min_capacity:
+                # Dense MACE capacity is measured per atom. The rolled-back
+                # geometry may need fewer slots than the overflowing geometry.
+                # Increase the additive request by the actual shortfall; do
+                # not evaluate forces on a list below the recovery target.
+                extra_capacity += max(
+                    min_capacity - width, 8 if overflow else 1
+                )
+            else:
+                extra_capacity = max(8, 2 * extra_capacity)
+        if min_capacity:
+            raise RuntimeError(
+                'Neighbor-list allocation overflowed or failed to reach minimum capacity'
+            )
         raise RuntimeError('Neighbor-list allocation overflowed after capacity growth')
 
     def initialize(self, key, positions):
@@ -171,6 +185,7 @@ class NVTStepper:
     def advance(self, state, nlist, *, chunk):
         if bool(np.asarray(nlist.did_buffer_overflow)):
             raise RuntimeError('MD chunk started with an overflowing neighbor list')
+        mace_md = getattr(self, 'md_energy_fn', None) is not None
         extra_capacity = max(8, int(nlist.idx.shape[-1]))
         for attempt in range(self.max_retries + 1):
             self._neighbor_diagnostic('chunk_start', nlist, chunk=chunk, attempt=attempt)
@@ -183,6 +198,10 @@ class NVTStepper:
                 if not bool(np.asarray(jnp.all(jnp.isfinite(trial_state.momentum)))):
                     raise FloatingPointError('Nonfinite momenta in accepted NVT chunk')
                 return trial_state, trial_nlist
+            if mace_md:
+                width = int(nlist.idx.shape[-1])
+                # Grow by about 10%, not by the entire padded width.
+                extra_capacity = max(8, (width + 9) // 10)
             self._neighbor_diagnostic(
                 'chunk_overflow', nlist, attempt=attempt,
                 extra_capacity=extra_capacity,
@@ -191,11 +210,17 @@ class NVTStepper:
                 raise RuntimeError(
                     f'Neighbor-list overflow persisted after {self.max_retries} retries'
                 )
-            nlist = self.allocate_valid_nlist(
-                state.position, extra_capacity=extra_capacity
-            )
+            if mace_md:
+                nlist = self.allocate_valid_nlist(
+                    state.position, extra_capacity=extra_capacity,
+                    min_capacity=width + extra_capacity,
+                )
+            else:
+                nlist = self.allocate_valid_nlist(
+                    state.position, extra_capacity=extra_capacity
+                )
+                extra_capacity *= 2
             state = self.refresh_force(state, nlist)
-            extra_capacity *= 2
         raise AssertionError('Unreachable neighbor-list recovery state')
 
     def synchronize(self, state, outcome: ReactionOutcome, *, key=None):
