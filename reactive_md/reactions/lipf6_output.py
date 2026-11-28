@@ -372,23 +372,29 @@ class LiPF6OutputObserver:
                     state.position, observation.ff.nlist
                 )['total']
             else:
-                extra_capacity = 2
-                for attempt in range(13):
-                    with perf.measure(
-                        'observer_mace_neighbor_allocate', attempt=attempt, extra_capacity=extra_capacity,
-                    ) as wait:
-                        neighbors = self.md_neighbor_fn.allocate(
-                            state.position, extra_capacity=extra_capacity
+                neighbors = getattr(observation, "md_neighbor_list", None)
+                if (neighbors is None
+                        or getattr(observation, "md_neighbor_fn", None) is not self.md_neighbor_fn
+                        or bool(np.asarray(neighbors.did_buffer_overflow))):
+                    # Legacy observers and invalid/mismatched lists retain the
+                    # original independently allocated energy-reporting path.
+                    extra_capacity = 2
+                    for attempt in range(13):
+                        with perf.measure(
+                            'observer_mace_neighbor_allocate', attempt=attempt, extra_capacity=extra_capacity,
+                        ) as wait:
+                            neighbors = self.md_neighbor_fn.allocate(
+                                state.position, extra_capacity=extra_capacity
+                            )
+                            neighbors = neighbors.update(state.position)
+                            wait(neighbors)
+                        if not bool(jnp.asarray(neighbors.did_buffer_overflow)):
+                            break
+                        extra_capacity = max(8, 2 * extra_capacity)
+                    else:
+                        raise RuntimeError(
+                            "MACE observer neighbor-list allocation overflowed"
                         )
-                        neighbors = neighbors.update(state.position)
-                        wait(neighbors)
-                    if not bool(jnp.asarray(neighbors.did_buffer_overflow)):
-                        break
-                    extra_capacity = max(8, 2 * extra_capacity)
-                else:
-                    raise RuntimeError(
-                        "MACE observer neighbor-list allocation overflowed"
-                    )
                 energy = self._compiled_md_energy(state.position, neighbors)
             energy.block_until_ready()
         with perf.measure('observer_kinetic_energy', step=observation.step):

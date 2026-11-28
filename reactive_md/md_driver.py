@@ -202,6 +202,10 @@ def run_md_nvt(
     metadata = _restart_metadata(cfg, box, masses, float_dtype)
     if mace_md:
         metadata["md_backend_id"] = md_backend_id
+    # Preserve old metadata exactly for legacy runs; never silently switch
+    # the experimental energy adapter on restart (including hybrid MC).
+    if cfg.mace_energy_only:
+        metadata["mace_energy_only"] = True
     accepted_events = 0
     steps_done = 0
     relaxation_elapsed = 0.0
@@ -288,6 +292,8 @@ def run_md_nvt(
             system=sys,
             outcome=outcome,
             pre_reaction_positions=pre_positions,
+            md_neighbor_list=md_nlist if mace_md else None,
+            md_neighbor_fn=md_neighbor_fn if mace_md else None,
         )
         for observer in observers:
             observer.on_observation(observation)
@@ -357,6 +363,8 @@ def run_md_nvt(
             system=sys,
             outcome=None,
             pre_reaction_positions=before,
+            md_neighbor_list=md_nlist if mace_md else None,
+            md_neighbor_fn=md_neighbor_fn if mace_md else None,
         )
         with perf.measure('before_reaction_observers', steps_done):
             for observer in observers:

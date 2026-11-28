@@ -117,6 +117,8 @@ def test_mace_driver_continues_after_reaction_with_separate_lists():
     old_system, new_system = object(), object()
     seen = []
     observations = []
+    before_observations = []
+    md_neighbors = MDNeighborFunction()
 
     class Handler:
         def attempt(self, context):
@@ -142,7 +144,15 @@ def test_mace_driver_continues_after_reaction_with_separate_lists():
             )
 
     class Observer:
+        def on_before_reaction(self, observation):
+            assert observation.md_neighbor_fn is md_neighbors
+            assert isinstance(observation.md_neighbor_list, MDNeighbors)
+            assert not bool(observation.md_neighbor_list.did_buffer_overflow)
+            before_observations.append(observation)
+
         def on_observation(self, observation):
+            assert observation.md_neighbor_fn is md_neighbors
+            assert isinstance(observation.md_neighbor_list, MDNeighbors)
             assert isinstance(observation.ff.nlist, ClassicalNeighbors)
             if observation.step == 0:
                 assert observation.ff.nlist is initial_list
@@ -155,8 +165,9 @@ def test_mace_driver_continues_after_reaction_with_separate_lists():
         init_positions=positions, masses=jnp.ones(2), shift_fn=shift,
         ff=old_ff, sys=old_system, reaction_handler=Handler(),
         observers=(Observer(),), md_energy_fn=md_energy,
-        md_neighbor_fn=MDNeighborFunction(),
+        md_neighbor_fn=md_neighbors,
     )
+    assert [o.step for o in before_observations] == [2, 4]
     assert result.steps_done == 4
     assert result.accepted_events == 1
     assert result.ff is new_ff and result.sys is new_system

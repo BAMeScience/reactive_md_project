@@ -22,6 +22,7 @@ def build_mace_energy_system(
     ensemble,
     dr_threshold=0.5,
     capacity_multiplier=6.0,
+    energy_only=False,
 ):
     use_fractional = ensemble == "npt"
 
@@ -59,7 +60,13 @@ def build_mace_energy_system(
                 box=box,
                 perturbation=perturbation,
             )
-            return model_energy(jax_model(batch, compute_stress=False))
+            # Explicit experimental path: upstream JAX-MD requests scalar
+            # energy only when differentiating externally. Keep legacy model
+            # adapters and production checkpoint behavior unchanged by default.
+            model_kwargs = {"compute_stress": False}
+            if energy_only:
+                model_kwargs["compute_force"] = False
+            return model_energy(jax_model(batch, **model_kwargs))
 
         return energy_fn
 

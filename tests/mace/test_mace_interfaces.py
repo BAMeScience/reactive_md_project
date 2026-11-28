@@ -174,3 +174,24 @@ def test_checkpoint_model_identity_includes_converted_weights(setup_module, monk
     assert mod.build_mace_model(return_backend_id=True)[3] == first
     weights['w'][0] = 3.
     assert mod.build_mace_model(return_backend_id=True)[3] != first
+
+
+@pytest.mark.parametrize('energy_only', [False, True])
+def test_energy_only_adapter_preserves_external_gradient(energy_module, monkeypatch, energy_only):
+    mod = energy_module
+    monkeypatch.setattr(mod.space, 'periodic_general', lambda *a, **k: (None, None))
+    monkeypatch.setattr(mod.partition, 'neighbor_list', lambda *a, **k: object())
+    monkeypatch.setattr(mod, 'mace_featurizer', lambda *a, **k: lambda R, n, **kw: R)
+    flags = []
+    def model(batch, *, compute_stress, compute_force=True):
+        assert not compute_stress
+        flags.append(compute_force)
+        return {'energy': jnp.sum(batch**2)}
+    _, _, _, make = mod.build_mace_energy_system(
+        jax_model=model, jax_model_config={'r_max': 4.5}, z_atomic=[3],
+        box0=jnp.eye(3)*10, ensemble='nve', energy_only=energy_only)
+    energy = make(object())
+    r = jnp.ones((1, 3))
+    assert float(energy(r)) == 3.
+    np.testing.assert_array_equal(jax.grad(energy)(r), 2*r)
+    assert flags == [not energy_only, not energy_only]

@@ -131,6 +131,10 @@ def test_application_restart_equivalence(tmp_path, surrogate_mace, mode, accept)
     assert split_path.read_bytes() == checkpoint_bytes
     assert [path.read_bytes() for path in split_outputs] == before
     surrogate_mace[0] = 1.
+    with pytest.raises(ValueError, match='metadata'):
+        lipf6.main(replace(split_cfg, mace_energy_only=True), restart_path=str(split_path))
+    assert split_path.read_bytes() == checkpoint_bytes
+    assert [path.read_bytes() for path in split_outputs] == before
 
     resumed = lipf6.main(split_cfg, restart_path=str(split_path), checkpoint_every_steps=2)
     expected, actual = load_checkpoint(full_path), load_checkpoint(split_path)

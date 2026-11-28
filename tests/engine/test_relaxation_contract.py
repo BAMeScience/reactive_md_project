@@ -10,7 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
-from jax_md import space
+from jax_md import space, partition
 
 from reactive_md import relaxation
 
@@ -66,7 +66,7 @@ def x64_enabled():
 
 
 def run_relaxation(neighbor_fn, *, dtype=jnp.float32,
-                   input_dtype=jnp.float32, override=True, **kwargs):
+                   input_dtype=jnp.float32, override=True, seed=17, **kwargs):
     _, shift = space.free()
     ff = SimpleNamespace(
         neighbor_fn=SimpleNamespace(allocate=forbidden, update=forbidden)
@@ -84,7 +84,7 @@ def run_relaxation(neighbor_fn, *, dtype=jnp.float32,
                        md_neighbor_fn=neighbor_fn)
     options.update(kwargs)
     return relaxation.langevin_relax_with_nlist(
-        jax.random.PRNGKey(17),
+        jax.random.PRNGKey(seed),
         jnp.array([[1., 0., 0.], [0., 1., 0.]], dtype=dtype),
         jnp.full((2, 3), 0.1, dtype=input_dtype), **options)
 
@@ -172,3 +172,83 @@ def test_relaxation_performance_preserves_retry_and_state(monkeypatch, capsys):
     assert [r['attempt'] for r in rows if r['stage'] == 'langevin_chunk_attempt'] == [0, 1]
     assert sum(r['stage'] == 'langevin_overflow_recovery' for r in rows) == 1
     assert [r['chunk_steps'] for r in rows if r['stage'] == 'langevin_chunk'] == [2]
+
+
+@pytest.mark.parametrize('dtype', [jnp.float32, jnp.float64])
+def test_cached_mace_relaxation_matches_fresh_trials(x64_enabled, dtype):
+    neighbors = NeighborFunction()
+    _, shift = space.free()
+    cache = relaxation.LangevinKernelCache()
+    traces = []
+    def energy(r, neighbor):
+        traces.append(None)
+        return harmonic_energy(r, neighbor)
+    for seed in (17, 91):
+        baseline = run_relaxation(neighbors, dtype=dtype, seed=seed, shift_fn=shift)
+        cached = run_relaxation(neighbors, dtype=dtype, seed=seed, shift_fn=shift,
+                                kernel_cache=cache, md_energy_fn=energy)
+        np.testing.assert_array_equal(cached[0], baseline[0])
+        for actual, expected in zip(cached[1:3], baseline[1:3]):
+            np.testing.assert_allclose(actual, expected, rtol=1e-6 if dtype == jnp.float32 else 1e-12,
+                                       atol=1e-7 if dtype == jnp.float32 else 1e-12)
+        if seed == 17:
+            kernels = cache._entry[-1]
+            trace_count = len(traces)
+            assert trace_count > 0
+        else:
+            assert cache._entry[-1] is kernels
+            assert len(traces) == trace_count
+
+
+class DenseNeighbor(NamedTuple):
+    idx: object
+    updates: object
+    did_buffer_overflow: object
+
+    @property
+    def format(self):
+        return partition.Dense
+
+
+class DenseNeighborFunction:
+    def __init__(self, *, sufficient=False):
+        self.sufficient = sufficient
+        self.requests = []
+
+    def allocate(self, positions, *, extra_capacity=0):
+        self.requests.append(extra_capacity)
+        # Simulate the 100-slot overflow and the smaller 97-slot estimate
+        # obtained from the rolled-back configuration during recovery.
+        width = (110 if self.sufficient else
+                 100 if len(self.requests) == 1 else 97 + extra_capacity)
+        return DenseNeighbor(jnp.zeros((len(positions), width), dtype=jnp.int32),
+                             jnp.asarray(0), jnp.asarray(False))
+
+    def update(self, positions, neighbor):
+        updates = neighbor.updates + 1
+        overflow = neighbor.did_buffer_overflow | ((updates >= 2) & (neighbor.idx.shape[-1] < 110))
+        return neighbor._replace(updates=updates, did_buffer_overflow=overflow)
+
+
+def test_dense_mace_relaxation_recovery_reaches_target_and_replays_rng(x64_enabled):
+    def energy(r, nl):
+        return jnp.sum(r**2) / 2
+
+    adequate = DenseNeighborFunction(sufficient=True)
+    recovery = DenseNeighborFunction()
+    baseline = run_relaxation(adequate, dtype=jnp.float64, md_energy_fn=energy)
+    result = run_relaxation(recovery, dtype=jnp.float64, md_energy_fn=energy,
+                            kernel_cache=relaxation.LangevinKernelCache())
+    assert recovery.requests == [0, 10, 13]
+    assert result[3].idx.shape[-1] == 110
+    assert not bool(result[3].did_buffer_overflow)
+    np.testing.assert_array_equal(result[0], baseline[0])
+    for actual, expected in zip(result[1:3], baseline[1:3]):
+        np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_classical_relaxation_rejects_external_kernel_cache():
+    neighbor = NeighborFunction()
+    with pytest.raises(ValueError, match='explicit MD backend'):
+        run_relaxation(neighbor, override=False, kernel_cache=relaxation.LangevinKernelCache())
+    assert neighbor.allocations == []

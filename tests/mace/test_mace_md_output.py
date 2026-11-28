@@ -174,3 +174,21 @@ def test_observer_performance_preserves_energy_and_retry(monkeypatch, capsys):
         'observer_kinetic_energy', 'before_reaction_observers']
     assert all(r['step'] == 1 for r in rows)
     assert all(r['parent_id'] == rows[3]['span_id'] for r in rows[1:3])
+
+
+@pytest.mark.parametrize('provenance,overflow', [(True, False), (True, True), (False, False)])
+def test_mace_observer_reuses_only_valid_matching_md_list(provenance, overflow, capsys):
+    from dataclasses import replace
+    neighbor_fn = FakeNeighborFunction()
+    observer = make_observer(neighbor_fn, lambda r, n: jnp.sum(n.idx) + jnp.sum(r**2))
+    obs = replace(make_observation(), md_neighbor_list=FakeNeighbor(
+        jnp.asarray(overflow), jnp.array([[17]], dtype=jnp.int32)),
+        md_neighbor_fn=neighbor_fn if provenance else object())
+    observer.on_before_reaction(obs)
+    out = capsys.readouterr().out
+    if provenance and not overflow:
+        assert neighbor_fn.capacities == []
+        assert 'PE= 17.000000' in out
+    else:
+        assert neighbor_fn.capacities == [2, 8]
+        assert 'PE= 2.000000' in out

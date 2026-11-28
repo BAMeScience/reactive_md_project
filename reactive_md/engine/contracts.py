@@ -70,6 +70,9 @@ class MDObservation:
     system: object
     outcome: ReactionOutcome | None
     pre_reaction_positions: object = None
+    # Valid at state.position; provenance identifies the producing backend.
+    md_neighbor_list: object = None
+    md_neighbor_fn: object = None
 
 
 class MDObserver(Protocol):

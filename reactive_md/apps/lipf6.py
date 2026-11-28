@@ -58,6 +58,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
         raise ValueError("MACE-MC is only supported in metropolis mode")
     if cfg.reaction_mode == "metropolis" and cfg.use_mace_md and not cfg.use_mace_mc:
         raise ValueError("Metropolis with MACE-MD requires MACE-MC")
+    if cfg.mace_energy_only and not (cfg.use_mace_mc or cfg.use_mace_md):
+        raise ValueError("mace_energy_only requires a MACE backend")
     if restart_path is not None and checkpoint_path is None:
         checkpoint_path = restart_path
     checkpoint_enabled = checkpoint_path is not None or restart_path is not None
@@ -237,6 +239,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
     md_energy_fn = None
     md_neighbor_fn = None
     md_backend_id = None
+    relaxation_kernel_cache = None
     # Classical Metropolis is the default when MACE-MC is disabled.
     beta = 1.0 / (cfg.kb_real * cfg.temperature_k)
    
@@ -284,6 +287,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                 cfg.relaxation_time_ps, cfg.relaxation_tau_ps,
                 cfg.r_cut, cfg.dr_threshold, cfg.p_type, cfg.f_type, cfg.li_type,
             )
+            if cfg.mace_energy_only:
+                md_backend_id = fingerprint(md_backend_id, "mace-energy-only-v1")
 
         (
             _mace_disp_fn,
@@ -298,7 +303,10 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             ensemble="nve",
             dr_threshold=cfg.mace_dr_threshold,
             capacity_multiplier=cfg.mace_capacity_multiplier,
+            **({"energy_only": True} if cfg.mace_energy_only else {}),
         )
+        if cfg.mace_energy_only:
+            print("MACE energy-only adapter: experimental (validated model required)")
 
         if cfg.use_mace_md:
            if cfg.md_unit_system == "real":
@@ -317,6 +325,8 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                return energy_factor * energy_eV
 
            md_neighbor_fn = mace_neighbor_fn
+           from ..relaxation import LangevinKernelCache
+           relaxation_kernel_cache = LangevinKernelCache()
 
            print("MD forces: MACE-JAX")
 
@@ -359,6 +369,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
                 reverse_rate_ps=cfg.reverse_rate_ps,
                 md_energy_fn=md_energy_fn,
                 md_neighbor_fn=md_neighbor_fn,
+                relaxation_kernel_cache=relaxation_kernel_cache,
             )
 
         return maybe_react_one_event(
@@ -375,6 +386,7 @@ def main(cfg: SimConfig, *, reaction_step_factory=None,
             mc_energy_evaluator=mc_energy_evaluator,
             md_energy_fn=md_energy_fn,
             md_neighbor_fn=md_neighbor_fn,
+            relaxation_kernel_cache=relaxation_kernel_cache,
             candidate_log_top_n=cfg.candidate_log_top_n,
             velocities=velocities, masses=masses,
             temperature_k=cfg.temperature_k, kb_real=kb_md,
@@ -545,6 +557,8 @@ def cli(argv=None):
         action="store_true",
         help="Use MACE-JAX forces for NVT MD integration.",
     )
+    parser.add_argument("--mace-energy-only", action="store_true",
+                        help="Experimental: disable internal model force calculation; benchmark first")
     parser.add_argument("--mace-source", default=default_cfg.mace_source)
     parser.add_argument("--mace-variant", default=default_cfg.mace_variant)
     parser.add_argument(
@@ -604,6 +618,7 @@ def cli(argv=None):
         mace_variant=args.mace_variant,
         mace_dr_threshold=args.mace_dr_threshold,
         mace_capacity_multiplier=args.mace_capacity_multiplier,
+        mace_energy_only=args.mace_energy_only,
     )
 
     main(

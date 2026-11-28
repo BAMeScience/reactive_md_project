@@ -60,6 +60,8 @@ def test_mace_relaxation_uses_md_thermal_units(monkeypatch, mocked_parser,
     captured = {}
 
     def reaction_stub(*args, **kwargs):
+        if captured:
+            assert kwargs["relaxation_kernel_cache"] is captured["relaxation_kernel_cache"]
         captured.update(kwargs)
 
     def driver_stub(key, **kwargs):
@@ -68,6 +70,8 @@ def test_mace_relaxation_uses_md_thermal_units(monkeypatch, mocked_parser,
             key, R, kwargs["ff"], kwargs["sys"], jnp.zeros_like(R),
             interval_ps=kwargs["cfg"].check_every * kwargs["cfg"].dt,
         )
+        kwargs["reaction_step_fn"](key, R, kwargs["ff"], kwargs["sys"],
+                                   jnp.zeros_like(R), interval_ps=.01)
         return kwargs
 
     monkeypatch.setattr(lipf6_app, "run_md_nvt_with_reactions", driver_stub)
@@ -81,6 +85,8 @@ def test_mace_relaxation_uses_md_thermal_units(monkeypatch, mocked_parser,
     assert captured["kb_real"] == pytest.approx(kb_md)
     assert captured["md_neighbor_fn"] is neighbor
     assert captured["md_energy_fn"] is result["md_energy_fn"]
+    from reactive_md.relaxation import LangevinKernelCache
+    assert isinstance(captured["relaxation_kernel_cache"], LangevinKernelCache)
     factor = 23.0605489 if unit_system == "real" else 1.0
     assert float(captured["md_energy_fn"](
         result["init_positions"], neighbor
@@ -179,6 +185,7 @@ def test_supported_application_modes(monkeypatch, mocked_parser, mode, mc, md):
     assert result['md_neighbor_fn'] is (neighbor if md else None)
     assert kw['md_energy_fn'] is result['md_energy_fn']
     assert kw['md_neighbor_fn'] is result['md_neighbor_fn']
+    assert (kw['relaxation_kernel_cache'] is not None) == md
     if mode == 'metropolis':
         evaluator = kw['mc_energy_evaluator']
         if mc:
@@ -262,6 +269,24 @@ def test_mace_checkpoint_identity_forwarded_to_generic_driver(
     assert calls[-1]['restart_path'] == path
     lipf6_app.main(replace(cfg, mace_dr_threshold=.9), checkpoint_path=path)
     assert calls[-1]['md_backend_id'] != original
+    lipf6_app.main(replace(cfg, mace_energy_only=True), checkpoint_path=path)
+    assert calls[-1]['md_backend_id'] != original
     model_id[0] = 'weights-b'
     lipf6_app.main(cfg, checkpoint_path=path)
     assert calls[-1]['md_backend_id'] != original
+
+
+def test_energy_only_requires_mace_before_io(monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail('Invalid mode reached input parsing')
+    monkeypatch.setattr(lipf6_app, 'parse_lammps_data', forbidden)
+    with pytest.raises(ValueError, match='requires a MACE backend'):
+        lipf6_app.main(SimConfig(mace_energy_only=True))
+
+
+def test_cli_energy_only_is_explicit(monkeypatch):
+    configs = []
+    monkeypatch.setattr(lipf6_app, 'main', lambda cfg, **kwargs: configs.append(cfg))
+    lipf6_app.cli(['--data', 'data', '--settings', 'settings', '--use-mace-mc'])
+    lipf6_app.cli(['--data', 'data', '--settings', 'settings', '--use-mace-mc', '--mace-energy-only'])
+    assert [c.mace_energy_only for c in configs] == [False, True]

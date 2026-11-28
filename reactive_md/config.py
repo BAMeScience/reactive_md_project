@@ -65,4 +65,6 @@ class SimConfig:
     mace_variant: str | None = None
     mace_dr_threshold: float = 0.5
     mace_capacity_multiplier: float = 1.25
+    # Experimental: only enable after actual model energy/force equivalence checks.
+    mace_energy_only: bool = False
 

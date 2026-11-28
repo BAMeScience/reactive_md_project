@@ -261,6 +261,7 @@ def maybe_react_one_event(
     mc_energy_evaluator=None,
     md_energy_fn=None,
     md_neighbor_fn=None,
+    relaxation_kernel_cache=None,
     candidate_log_top_n: int = 10,
     velocities=None,
     masses=None,
@@ -413,6 +414,8 @@ def maybe_react_one_event(
             thermostat_tau_ps=relaxation_tau_ps,
             md_energy_fn=md_energy_fn,
             md_neighbor_fn=md_neighbor_fn,
+            **({"kernel_cache": relaxation_kernel_cache}
+               if relaxation_kernel_cache is not None else {}),
         )
         wait(R_relaxed, v_relaxed, nlist_relaxed, key)
 
@@ -509,6 +512,7 @@ def maybe_react_rate_events(
     reverse_rate_ps: float = 0.0,
     md_energy_fn=None,
     md_neighbor_fn=None,
+    relaxation_kernel_cache=None,
 ):
     """Attempt rate-based reactions.
 
@@ -818,6 +822,8 @@ def maybe_react_rate_events(
             thermostat_tau_ps=relaxation_tau_ps,
             md_energy_fn=md_energy_fn,
             md_neighbor_fn=md_neighbor_fn,
+            **({"kernel_cache": relaxation_kernel_cache}
+               if relaxation_kernel_cache is not None else {}),
         )
         wait(R_relaxed, v_relaxed, nlist_relaxed, key)
 
